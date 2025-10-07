@@ -182,18 +182,16 @@ If you prefer command-line configuration, you can use Ansible or Docker Compose 
 
 After deployment, services are accessible on these ports:
 
-| Service | Port | URL Example | Default Credentials |
-|---------|------|-------------|---------------------|
-| **Configuration Wizard** | 9443 | `https://your-ip:9443` | None |
-| **Grafana** | 443 | `https://your-ip` | admin / admin |
-| **Prometheus** | 9090 | `http://your-ip:9090` | None |
-| **Loki** | 3100 | `http://your-ip:3100` | None |
-| **Alertmanager** | 9093 | `http://your-ip:9093` | None |
-| **Mimir** | 9009 | `http://your-ip:9009` | None |
-| **Tempo** | 3200 | `http://your-ip:3200` | None |
-| **OpenTelemetry** | 4317/4318 | `http://your-ip:4317` (gRPC) / `4318` (HTTP) | None |
-
-⚠️ **Security Note**: Change the default Grafana password immediately after first login!
+| Service | Port | URL Example |
+|---------|------|-------------|
+| **Configuration Wizard** | 9443 | `https://your-ip:9443` |
+| **Grafana** | 443 | `https://your-ip` |
+| **Prometheus** | 9090 | `http://your-ip:9090` |
+| **Loki** | 3100 | `http://your-ip:3100` |
+| **Alertmanager** | 9093 | `http://your-ip:9093` |
+| **Mimir** | 9009 | `http://your-ip:9009` |
+| **Tempo** | 3200 | `http://your-ip:3200` |
+| **OpenTelemetry** | 4317/4318 | `http://your-ip:4317` (gRPC) / `4318` (HTTP) |
 
 ## Examples
 
@@ -328,35 +326,6 @@ STACK_NAME=dev-monitoring \
 3. Configure Prometheus scrape configs for your exporters
 4. Import pre-built dashboards (Node Exporter Full, AWS CloudWatch, etc.)
 5. Set up alerts for disk space, CPU, memory thresholds
-
-## Cost Estimates
-
-### AWS
-
-| Configuration | Instance Type | Monthly Cost (estimate) |
-|---------------|---------------|-------------------------|
-| Testing | 1x t3.small | ~$25 |
-| Small Production | 1x t3.medium + S3 | ~$50 |
-| Medium Production | 1x t3.large + S3 + EBS | ~$100 |
-| HA Production | 3x t3.large + NLB + S3 | ~$250 |
-
-### Hetzner Cloud
-
-| Configuration | Server Type | Monthly Cost (estimate) |
-|---------------|-------------|-------------------------|
-| Testing | 1x cx22 | ~€8 |
-| Small Production | 1x cx32 + Object Storage | ~€20 |
-| HA Production | 3x cx32 + Object Storage | ~€50 |
-
-### Exoscale
-
-| Configuration | Instance Type | Monthly Cost (estimate) |
-|---------------|---------------|-------------------------|
-| Testing | 1x standard.medium | ~CHF 40 |
-| Small Production | 1x standard.large + SOS | ~CHF 80 |
-| HA Production | 3x standard.large + SOS | ~CHF 250 |
-
-*Costs vary by region, storage usage, and data transfer. Check your cloud provider for exact pricing.*
 
 ## Security Best Practices
 

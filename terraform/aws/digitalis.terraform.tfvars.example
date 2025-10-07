@@ -1,0 +1,91 @@
+# Example Terraform variables file for AWS monitoring stack
+# Copy this file to terraform.tfvars and customize the values
+
+# Required: Basic Configuration
+region     = "us-east-1"
+vpc_id     = "vpc-b287b3d5"
+subnet_ids = ["subnet-1609f14d", "subnet-7909bc30", "subnet-8ef89ceb"]
+
+# Project Information
+project_name = "dm"
+environment  = "production"
+
+# Instance Configuration
+instance_count   = 1
+instance_type    = "t3.large"
+key_pair_name    = "serg"
+root_volume_size = 50
+data_volume_size = 10
+
+ami_id = "ami-0def77c2ec2c9020f"
+
+# S3 Buckets for Storage
+enable_mimir_bucket  = true
+enable_loki_bucket   = true
+enable_tempo_bucket  = true
+enable_backup_bucket = true
+
+# Optional: Custom bucket names (auto-generated if not specified)
+mimir_bucket_name  = "dm-serg-mimir-bucket"
+loki_bucket_name   = "dm-serg-loki-bucket"
+tempo_bucket_name  = "dm-serg-tempo-bucket"
+backup_bucket_name = "dm-serg-backup-bucket"
+
+# S3 Bucket Configuration
+bucket_versioning    = true
+bucket_encryption    = true
+bucket_force_destroy = false
+
+# Network Load Balancer
+enable_load_balancer   = true
+load_balancer_internal = false
+
+# Optional: Different subnets for load balancer
+# lb_subnet_ids = ["subnet-public-1", "subnet-public-2"]
+
+# Security Configuration
+# By default, all traffic within VPC is allowed
+# Add external CIDR blocks if you need access from outside the VPC
+allowed_external_cidrs = ["80.4.138.234/32", "83.37.234.212/32"]
+
+# Optional: Specify VPC CIDR if not auto-detected
+# vpc_cidr = "10.0.0.0/16"
+
+# Auto-Scaling Configuration (alternative to fixed instance count)
+# enable_auto_scaling = true
+# min_size            = 2
+# max_size            = 6
+# desired_capacity    = 3
+# health_check_grace_period = 300
+
+# Monitoring and Logging
+enable_monitoring         = true
+enable_cloudwatch_logs    = true
+cloudwatch_retention_days = 30
+
+# Enable CloudWatch datasource permissions for Grafana
+enable_cloudwatch_datasource = true
+
+# Systems Manager Access
+enable_ssm = true
+
+# Elastic IPs (for fixed instance deployment)
+# enable_eip = true
+
+# Protection
+enable_termination_protection = false
+
+# Optional: Use existing IAM instance profile
+# iam_instance_profile = "existing-profile-name"
+
+# Optional: Custom user data script
+# user_data_script = file("${path.root}/custom_user_data.sh")
+
+# Resource Tags
+tags = {
+  Project     = "Monitoring"
+  Team        = "DevOps"
+  Environment = "Production"
+  CostCenter  = "Infrastructure"
+  ManagedBy   = "Terraform"
+}

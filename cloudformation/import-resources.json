@@ -1,0 +1,16 @@
+[
+  {
+    "ResourceType": "AWS::EC2::Instance",
+    "LogicalResourceId": "MonitoringInstance",
+    "ResourceIdentifier": {
+      "InstanceId": "i-EXISTING-INSTANCE-ID"
+    }
+  },
+  {
+    "ResourceType": "AWS::EC2::SecurityGroup",
+    "LogicalResourceId": "MonitoringSecurityGroup",
+    "ResourceIdentifier": {
+      "GroupId": "sg-EXISTING-SECURITY-GROUP-ID"
+    }
+  }
+]

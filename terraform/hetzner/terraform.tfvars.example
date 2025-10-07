@@ -1,0 +1,73 @@
+# Project configuration
+project_name = "dm"
+environment  = "prod"
+role         = "digitalis-monitoring"
+
+# Hetzner Cloud location
+# Options: nbg1 (Nuremberg), fsn1 (Falkenstein), hel1 (Helsinki), ash (Ashburn), hil (Hillsboro)
+location = "nbg1"
+
+# Instance configuration
+instance_count = 1
+server_type    = "cx31" # cx21, cx31, cx41, cx51, ccx13, ccx23, ccx33
+disk_size      = 100    # Additional volume size in GB (0 = no additional volume)
+
+# OS image
+image_name = "ubuntu-22.04"
+
+# SSH key (leave empty to auto-generate)
+ssh_key_name = ""
+
+# Hetzner Object Storage configuration
+# Enable to use Hetzner's S3-compatible object storage
+enable_object_storage = false
+
+# Hetzner Object Storage region (fsn1, nbg1, hel1)
+object_storage_region = "fsn1"
+
+# Hetzner Object Storage credentials
+# Can also be set via environment variables:
+# export MINIO_ACCESS_KEY="your-access-key"
+# export MINIO_SECRET_KEY="your-secret-key"
+object_storage_access_key = ""
+object_storage_secret_key = ""
+
+# Storage buckets
+enable_mimir_bucket  = true
+enable_loki_bucket   = true
+enable_tempo_bucket  = true
+enable_backup_bucket = true
+
+# Optional custom bucket names (leave empty for auto-generated names)
+mimir_bucket_name  = ""
+loki_bucket_name   = ""
+tempo_bucket_name  = ""
+backup_bucket_name = ""
+
+# Force destroy buckets on terraform destroy (use with caution!)
+bucket_force_destroy = false
+
+# Network configuration
+enable_ipv6            = false
+enable_private_network = false
+private_network_subnet = "10.0.0.0/16"
+
+# Placement group for HA (spreads instances across physical hosts)
+enable_placement_group = false
+
+# Security configuration
+# External CIDRs allowed to access monitoring services
+# Default: ["0.0.0.0/0"] - open to all
+# For restricted access, use specific CIDRs: ["1.2.3.4/32", "5.6.7.0/24"]
+allowed_external_cidrs = ["0.0.0.0/0"]
+
+# Tags/Labels
+tags = {
+  Project     = "Monitoring Stack"
+  Team        = "DevOps"
+  ManagedBy   = "Terraform"
+  Environment = "Production"
+}
+
+# Custom user data script (leave empty to use default)
+user_data_script = ""

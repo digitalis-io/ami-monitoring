@@ -1,0 +1,1001 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Monitoring Stack - Simplified EC2 Instance with S3 Buckets'
+
+Parameters:
+  # Network Configuration
+  VpcId:
+    Type: String
+    Default: ''
+    Description: 'VPC ID for deployment. Leave empty to automatically use the default VPC in your account. Example: vpc-0123456789abcdef0'
+
+  SubnetId:
+    Type: String
+    Default: ''
+    Description: 'Subnet ID for the EC2 instance. Leave empty to automatically use a default subnet in your VPC. Must be in the same VPC. Example: subnet-0123456789abcdef0'
+
+  AllowedExternalCidrs:
+    Type: CommaDelimitedList
+    Default: '0.0.0.0/0'
+    Description: 'Comma-separated list of CIDR blocks allowed to access monitoring services. Use 0.0.0.0/0 for public access (not recommended for production). For security, restrict to your IP: x.x.x.x/32. Example: 203.0.113.10/32,198.51.100.0/24'
+
+  # Project Configuration
+  ProjectName:
+    Type: String
+    Default: dm
+    Description: 'Project name used as prefix for all resource names. Keep it short and lowercase. Example: mycompany-monitoring'
+    AllowedPattern: '^[a-z0-9-]{1,20}$'
+    ConstraintDescription: 'Must be 1-20 characters, lowercase letters, numbers, and hyphens only'
+
+  Environment:
+    Type: String
+    Default: prod
+    Description: 'Environment type for this deployment. Used for resource tagging and naming. Choose: dev (development/testing), staging (pre-production), or prod (production)'
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+
+  Role:
+    Type: String
+    Default: digitalis-monitoring
+    Description: 'Role/purpose tag for identifying resources. This appears in AWS resource tags for organization and cost tracking'
+
+  # Instance Configuration
+  InstanceType:
+    Type: String
+    Default: t3.medium
+    Description: 'EC2 instance type. Recommendations: t3.small (~$15/mo, testing only), t3.medium (~$30/mo, small deployments), t3.large (~$60/mo, medium deployments), t3.xlarge (~$120/mo, production), t3.2xlarge (~$240/mo, large production)'
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - t3.2xlarge
+
+  RootVolumeSize:
+    Type: Number
+    Default: 50
+    Description: 'Size of the root/OS volume in GB. Contains operating system and application files. Default 50GB is sufficient for most deployments. Increase if you have many applications or large log retention'
+    MinValue: 20
+    MaxValue: 1000
+
+  DataVolumeSize:
+    Type: Number
+    Default: 50
+    Description: 'Size of the data volume in GB for local metrics and logs storage. Increase based on your retention needs and metric volume. For production with heavy metrics, consider 200GB+'
+    MinValue: 10
+    MaxValue: 16000
+
+  # S3 Storage Configuration
+  CreateMimirBucket:
+    Type: String
+    Default: 'false'
+    Description: 'Create a new S3 bucket for Mimir long-term metrics storage. Set to true to automatically create an encrypted, versioned bucket with auto-generated name. Enables metrics retention beyond local storage'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  MimirBucketName:
+    Type: String
+    Default: ''
+    Description: 'Name of EXISTING S3 bucket for Mimir storage. Only used if CreateMimirBucket is false and you want to use your own bucket. Leave empty if creating new bucket. Must be globally unique'
+
+  CreateLokiBucket:
+    Type: String
+    Default: 'false'
+    Description: 'Create a new S3 bucket for Loki long-term log storage. Set to true to automatically create an encrypted, versioned bucket with auto-generated name. Enables log retention beyond local storage'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  LokiBucketName:
+    Type: String
+    Default: ''
+    Description: 'Name of EXISTING S3 bucket for Loki storage. Only used if CreateLokiBucket is false and you want to use your own bucket. Leave empty if creating new bucket. Must be globally unique'
+
+  CreateTempoBucket:
+    Type: String
+    Default: 'false'
+    Description: 'Create a new S3 bucket for Tempo distributed tracing storage. Set to true to automatically create an encrypted, versioned bucket with auto-generated name. Enables trace retention beyond local storage'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  TempoBucketName:
+    Type: String
+    Default: ''
+    Description: 'Name of EXISTING S3 bucket for Tempo storage. Only used if CreateTempoBucket is false and you want to use your own bucket. Leave empty if creating new bucket. Must be globally unique'
+
+  CreateBackupBucket:
+    Type: String
+    Default: 'false'
+    Description: 'Create a new S3 bucket for configuration backups. Set to true to automatically create an encrypted, versioned bucket for storing Grafana dashboards, alert rules, and other configuration backups'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  BackupBucketName:
+    Type: String
+    Default: ''
+    Description: 'Name of EXISTING S3 bucket for backups. Only used if CreateBackupBucket is false and you want to use your own bucket. Leave empty if creating new bucket. Must be globally unique'
+
+  # Access and Features
+  EnableEIP:
+    Type: String
+    Default: 'false'
+    Description: 'Attach an Elastic IP (static public IP) to the instance. Set to true if you need a consistent IP address that persists across instance restarts. Costs $3.60/month if instance is stopped'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  EnableSSM:
+    Type: String
+    Default: 'true'
+    Description: 'Enable AWS Systems Manager (SSM) Session Manager for secure shell access without SSH keys. Recommended: keep enabled for easy, secure access via AWS Console. No additional cost'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  EnableCloudWatchDatasource:
+    Type: String
+    Default: 'true'
+    Description: 'Grant IAM permissions for Grafana to query AWS CloudWatch metrics and logs. Enables monitoring of AWS resources (EC2, RDS, Lambda, etc.) directly in Grafana. Recommended: keep enabled'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  KeyPairName:
+    Type: String
+    Default: ''
+    Description: 'EC2 SSH key pair name for SSH access. Optional - only needed if you want traditional SSH access. Leave empty to rely on SSM Session Manager. Must be an existing key pair in this region'
+
+  AmiId:
+    Type: String
+    Default: ''
+    Description: 'Custom AMI ID to use instead of the latest Ubuntu 22.04. Leave empty to automatically use the latest Ubuntu 22.04 LTS AMI. Only specify if you have a custom image. Example: ami-0123456789abcdef0'
+
+Conditions:
+  UseLatestAmi: !Equals [!Ref AmiId, '']
+  UseKeyPair: !Not [!Equals [!Ref KeyPairName, '']]
+  UseDefaultVpc: !Equals [!Ref VpcId, '']
+  UseDefaultSubnet: !Equals [!Ref SubnetId, '']
+  UseProvidedVpc: !Not [!Equals [!Ref VpcId, '']]
+  HasExternalAccess: !Not [!Equals [!Join ['', !Ref AllowedExternalCidrs], '']]
+  CreateEIP: !Equals [!Ref EnableEIP, 'true']
+  EnableSSMAccess: !Equals [!Ref EnableSSM, 'true']
+  CreateCloudWatchPermissions: !Equals [!Ref EnableCloudWatchDatasource, 'true']
+  ShouldCreateMimirBucket: !Equals [!Ref CreateMimirBucket, 'true']
+  ShouldCreateLokiBucket: !Equals [!Ref CreateLokiBucket, 'true']
+  ShouldCreateTempoBucket: !Equals [!Ref CreateTempoBucket, 'true']
+  ShouldCreateBackupBucket: !Equals [!Ref CreateBackupBucket, 'true']
+  HasMimirBucket: !Or
+    - !Equals [!Ref CreateMimirBucket, 'true']
+    - !Not [!Equals [!Ref MimirBucketName, '']]
+  HasLokiBucket: !Or
+    - !Equals [!Ref CreateLokiBucket, 'true']
+    - !Not [!Equals [!Ref LokiBucketName, '']]
+  HasTempoBucket: !Or
+    - !Equals [!Ref CreateTempoBucket, 'true']
+    - !Not [!Equals [!Ref TempoBucketName, '']]
+  HasBackupBucket: !Or
+    - !Equals [!Ref CreateBackupBucket, 'true']
+    - !Not [!Equals [!Ref BackupBucketName, '']]
+
+Mappings:
+  ServicePorts:
+    Ports:
+      Wizard: 9443
+      Grafana: 443
+      Loki: 3100
+      OtelGrpc: 4317
+      OtelHttp: 4318
+      TempoHttp: 3200
+      TempoGrpc: 9095
+      Mimir: 9009
+      Prometheus: 9090
+      Alertmanager: 9093
+      MimirCluster: 7946
+
+Resources:
+  # S3 Buckets (Optional)
+  MimirBucket:
+    Type: AWS::S3::Bucket
+    Condition: ShouldCreateMimirBucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-mimir-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-mimir'
+        - Key: Environment
+          Value: !Ref Environment
+
+  LokiBucket:
+    Type: AWS::S3::Bucket
+    Condition: ShouldCreateLokiBucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-loki-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-loki'
+        - Key: Environment
+          Value: !Ref Environment
+
+  TempoBucket:
+    Type: AWS::S3::Bucket
+    Condition: ShouldCreateTempoBucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-tempo-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-tempo'
+        - Key: Environment
+          Value: !Ref Environment
+
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    Condition: ShouldCreateBackupBucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-backup-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldBackups
+            Status: Enabled
+            ExpirationInDays: 60
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-backup'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Get Default VPC
+  DefaultVpcCustomResource:
+    Type: AWS::CloudFormation::CustomResource
+    Condition: UseDefaultVpc
+    Properties:
+      ServiceToken: !GetAtt DefaultVpcFunction.Arn
+
+  DefaultVpcFunction:
+    Type: AWS::Lambda::Function
+    Condition: UseDefaultVpc
+    Properties:
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt DefaultVpcFunctionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+
+                  ec2 = boto3.client('ec2')
+                  # Get default VPC
+                  vpcs = ec2.describe_vpcs(Filters=[{'Name': 'is-default', 'Values': ['true']}])
+
+                  if not vpcs['Vpcs']:
+                      raise Exception('No default VPC found')
+
+                  vpc_id = vpcs['Vpcs'][0]['VpcId']
+                  vpc_cidr = vpcs['Vpcs'][0]['CidrBlock']
+
+                  # Get default subnets, excluding us-east-1e
+                  subnets = ec2.describe_subnets(
+                      Filters=[
+                          {'Name': 'vpc-id', 'Values': [vpc_id]},
+                          {'Name': 'default-for-az', 'Values': ['true']}
+                      ]
+                  )
+
+                  if not subnets['Subnets']:
+                      raise Exception('No default subnet found')
+
+                  # Filter out subnets in us-east-1e (or any AZ ending with 'e')
+                  # This ensures t3.medium compatibility
+                  valid_subnets = []
+                  for subnet in subnets['Subnets']:
+                      az = subnet['AvailabilityZone']
+                      # Avoid AZs that commonly have limited instance type support
+                      # Specifically excluding us-east-1e where t3.medium is not supported
+                      if not az.endswith('1e'):
+                          valid_subnets.append(subnet)
+
+                  if not valid_subnets:
+                      # If no valid subnets after filtering, use first available
+                      # but log a warning
+                      print(f"Warning: No subnets found outside of restricted AZs")
+                      valid_subnets = subnets['Subnets']
+
+                  # Sort by AZ name to ensure consistent selection (prefer a, b, c, d, f)
+                  valid_subnets.sort(key=lambda x: x['AvailabilityZone'])
+                  subnet_id = valid_subnets[0]['SubnetId']
+                  selected_az = valid_subnets[0]['AvailabilityZone']
+
+                  print(f"Selected subnet {subnet_id} in AZ {selected_az}")
+
+                  response_data = {
+                      'VpcId': vpc_id,
+                      'VpcCidr': vpc_cidr,
+                      'SubnetId': subnet_id
+                  }
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+              except Exception as e:
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {}, str(e))
+
+  DefaultVpcFunctionRole:
+    Type: AWS::IAM::Role
+    Condition: UseDefaultVpc
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DescribeVpcSubnet
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeSubnets
+                Resource: '*'
+
+  # Get VPC CIDR for provided VPC
+  VpcCidrCustomResource:
+    Type: AWS::CloudFormation::CustomResource
+    Condition: UseProvidedVpc
+    Properties:
+      ServiceToken: !GetAtt VpcCidrFunction.Arn
+      VpcId: !Ref VpcId
+
+  VpcCidrFunction:
+    Type: AWS::Lambda::Function
+    Condition: UseProvidedVpc
+    Properties:
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt VpcCidrFunctionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+
+                  vpc_id = event['ResourceProperties']['VpcId']
+                  ec2 = boto3.client('ec2')
+                  response = ec2.describe_vpcs(VpcIds=[vpc_id])
+                  vpc_cidr = response['Vpcs'][0]['CidrBlock']
+
+                  response_data = {'Cidr': vpc_cidr}
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+              except Exception as e:
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {}, str(e))
+
+  VpcCidrFunctionRole:
+    Type: AWS::IAM::Role
+    Condition: UseProvidedVpc
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DescribeVpc
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeVpcs
+                Resource: '*'
+
+  # Security Group
+  MonitoringSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for monitoring stack
+      VpcId: !If
+        - UseDefaultVpc
+        - !GetAtt DefaultVpcCustomResource.VpcId
+        - !Ref VpcId
+      SecurityGroupIngress:
+        - Description: Allow all traffic from VPC
+          IpProtocol: -1
+          CidrIp: !If
+            - UseDefaultVpc
+            - !GetAtt DefaultVpcCustomResource.VpcCidr
+            - !GetAtt VpcCidrCustomResource.Cidr
+      SecurityGroupEgress:
+        - Description: Allow all outbound
+          IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-monitoring-sg'
+
+  # Self-referencing ingress rules
+  SelfAllIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref MonitoringSecurityGroup
+      Description: Allow all from self
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref MonitoringSecurityGroup
+
+  # External access rules (conditional)
+  ExternalWizardIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasExternalAccess
+    Properties:
+      GroupId: !Ref MonitoringSecurityGroup
+      Description: Wizard from external
+      IpProtocol: tcp
+      FromPort: !FindInMap [ServicePorts, Ports, Wizard]
+      ToPort: !FindInMap [ServicePorts, Ports, Wizard]
+      CidrIp: !Select [0, !Ref AllowedExternalCidrs]
+
+  ExternalSSHIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasExternalAccess
+    Properties:
+      GroupId: !Ref MonitoringSecurityGroup
+      Description: SSH from external
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp: !Select [0, !Ref AllowedExternalCidrs]
+
+  ExternalGrafanaIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasExternalAccess
+    Properties:
+      GroupId: !Ref MonitoringSecurityGroup
+      Description: Grafana HTTPS from external
+      IpProtocol: tcp
+      FromPort: !FindInMap [ServicePorts, Ports, Grafana]
+      ToPort: !FindInMap [ServicePorts, Ports, Grafana]
+      CidrIp: !Select [0, !Ref AllowedExternalCidrs]
+
+  ExternalLokiIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasExternalAccess
+    Properties:
+      GroupId: !Ref MonitoringSecurityGroup
+      Description: Loki from external
+      IpProtocol: tcp
+      FromPort: !FindInMap [ServicePorts, Ports, Loki]
+      ToPort: !FindInMap [ServicePorts, Ports, Loki]
+      CidrIp: !Select [0, !Ref AllowedExternalCidrs]
+
+  ExternalPrometheusIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasExternalAccess
+    Properties:
+      GroupId: !Ref MonitoringSecurityGroup
+      Description: Prometheus from external
+      IpProtocol: tcp
+      FromPort: !FindInMap [ServicePorts, Ports, Prometheus]
+      ToPort: !FindInMap [ServicePorts, Ports, Prometheus]
+      CidrIp: !Select [0, !Ref AllowedExternalCidrs]
+
+  # IAM Role and Instance Profile
+  MonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !If [EnableSSMAccess, 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore', !Ref 'AWS::NoValue']
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-monitoring-role'
+
+  MonitoringCorePolicy:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: !Ref MonitoringRole
+      PolicyName: !Sub '${ProjectName}-${Environment}-core-access'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowReadingTagsInstancesRegionsFromEC2
+            Effect: Allow
+            Action:
+              - ec2:DescribeTags
+              - ec2:DescribeInstances
+              - ec2:DescribeRegions
+            Resource: '*'
+          - !If
+            - HasMimirBucket
+            - Effect: Allow
+              Action:
+                - s3:ListBucket
+                - s3:GetObject
+                - s3:PutObject
+                - s3:DeleteObject
+              Resource:
+                - !Sub
+                  - 'arn:aws:s3:::${BucketName}'
+                  - BucketName: !If [ShouldCreateMimirBucket, !Ref MimirBucket, !Ref MimirBucketName]
+                - !Sub
+                  - 'arn:aws:s3:::${BucketName}/*'
+                  - BucketName: !If [ShouldCreateMimirBucket, !Ref MimirBucket, !Ref MimirBucketName]
+            - !Ref AWS::NoValue
+          - !If
+            - HasLokiBucket
+            - Effect: Allow
+              Action:
+                - s3:ListBucket
+                - s3:GetObject
+                - s3:PutObject
+                - s3:DeleteObject
+              Resource:
+                - !Sub
+                  - 'arn:aws:s3:::${BucketName}'
+                  - BucketName: !If [ShouldCreateLokiBucket, !Ref LokiBucket, !Ref LokiBucketName]
+                - !Sub
+                  - 'arn:aws:s3:::${BucketName}/*'
+                  - BucketName: !If [ShouldCreateLokiBucket, !Ref LokiBucket, !Ref LokiBucketName]
+            - !Ref AWS::NoValue
+          - !If
+            - HasTempoBucket
+            - Effect: Allow
+              Action:
+                - s3:ListBucket
+                - s3:GetObject
+                - s3:PutObject
+                - s3:DeleteObject
+              Resource:
+                - !Sub
+                  - 'arn:aws:s3:::${BucketName}'
+                  - BucketName: !If [ShouldCreateTempoBucket, !Ref TempoBucket, !Ref TempoBucketName]
+                - !Sub
+                  - 'arn:aws:s3:::${BucketName}/*'
+                  - BucketName: !If [ShouldCreateTempoBucket, !Ref TempoBucket, !Ref TempoBucketName]
+            - !Ref AWS::NoValue
+          - !If
+            - HasBackupBucket
+            - Effect: Allow
+              Action:
+                - s3:ListBucket
+                - s3:GetObject
+                - s3:PutObject
+                - s3:DeleteObject
+              Resource:
+                - !Sub
+                  - 'arn:aws:s3:::${BucketName}'
+                  - BucketName: !If [ShouldCreateBackupBucket, !Ref BackupBucket, !Ref BackupBucketName]
+                - !Sub
+                  - 'arn:aws:s3:::${BucketName}/*'
+                  - BucketName: !If [ShouldCreateBackupBucket, !Ref BackupBucket, !Ref BackupBucketName]
+            - !Ref AWS::NoValue
+
+  MonitoringCloudWatchPolicy:
+    Type: AWS::IAM::RolePolicy
+    Condition: CreateCloudWatchPermissions
+    Properties:
+      RoleName: !Ref MonitoringRole
+      PolicyName: !Sub '${ProjectName}-${Environment}-cloudwatch'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowReadingMetricsFromCloudWatch
+            Effect: Allow
+            Action:
+              - cloudwatch:DescribeAlarmsForMetric
+              - cloudwatch:DescribeAlarmHistory
+              - cloudwatch:DescribeAlarms
+              - cloudwatch:ListMetrics
+              - cloudwatch:GetMetricData
+              - cloudwatch:GetMetricStatistics
+              - cloudwatch:GetMetricWidgetImage
+              - cloudwatch:ListDashboards
+            Resource: '*'
+          - Sid: AllowReadingLogsFromCloudWatch
+            Effect: Allow
+            Action:
+              - logs:DescribeLogGroups
+              - logs:GetLogGroupFields
+              - logs:StartQuery
+              - logs:StopQuery
+              - logs:GetQueryResults
+              - logs:GetLogEvents
+            Resource: '*'
+          - Sid: AllowReadingResourcesForTags
+            Effect: Allow
+            Action:
+              - tag:GetResources
+            Resource: '*'
+
+  MonitoringInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref MonitoringRole
+
+  # SSH Key Generation
+  SSHKeyFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt SSHKeyFunctionRole.Arn
+      Timeout: 30
+      Layers:
+        # Use Klayers public layer for cryptography
+        # Find ARN at: https://github.com/keithrozario/Klayers
+        - arn:aws:lambda:us-east-1:770693421928:layer:Klayers-p312-cryptography:17
+      Code:
+        ZipFile: |
+          import json
+          import cfnresponse
+          from cryptography.hazmat.primitives import serialization
+          from cryptography.hazmat.primitives.asymmetric import ed25519
+
+          def create_ssh_key():
+              """
+              Generates an Ed25519 SSH key pair (private and public keys).
+              Ed25519 provides better security, performance, and smaller key sizes than RSA.
+              """
+              # Generate Ed25519 private key
+              private_key = ed25519.Ed25519PrivateKey.generate()
+
+              # Serialize private key to OpenSSH format
+              private_key_pem = private_key.private_bytes(
+                  encoding=serialization.Encoding.PEM,
+                  format=serialization.PrivateFormat.OpenSSH,
+                  encryption_algorithm=serialization.NoEncryption()
+              ).decode('utf-8')
+
+              # Get public key and serialize to OpenSSH format
+              public_key = private_key.public_key()
+              public_key_ssh = public_key.public_bytes(
+                  encoding=serialization.Encoding.OpenSSH,
+                  format=serialization.PublicFormat.OpenSSH
+              ).decode('utf-8')
+
+              # Add comment to public key
+              public_key_with_comment = f"{public_key_ssh} ansible@monitoring"
+
+              return private_key_pem, public_key_with_comment
+
+          def handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+
+                  # Generate Ed25519 SSH keys
+                  private_key, public_key = create_ssh_key()
+
+                  response_data = {
+                      'PrivateKey': private_key,
+                      'PublicKey': public_key
+                  }
+
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+              except Exception as e:
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {}, str(e))
+
+  SSHKeyFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  SSHKeyResource:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt SSHKeyFunction.Arn
+
+  # EC2 Instance
+  MonitoringInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      SubnetId: !If
+        - UseDefaultSubnet
+        - !If
+          - UseDefaultVpc
+          - !GetAtt DefaultVpcCustomResource.SubnetId
+          - !Ref AWS::NoValue
+        - !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref MonitoringSecurityGroup
+      KeyName: !If [UseKeyPair, !Ref KeyPairName, !Ref 'AWS::NoValue']
+      IamInstanceProfile: !Ref MonitoringInstanceProfile
+      DisableApiTermination: false
+      InstanceInitiatedShutdownBehavior: stop
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: !Ref RootVolumeSize
+            Encrypted: true
+            DeleteOnTermination: true
+        - DeviceName: /dev/sdf
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: !Ref DataVolumeSize
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64:
+          Fn::Sub:
+            - |
+              #!/bin/bash
+              set -e
+
+              # Configuration
+              MOUNT_POINT="/data"
+              FILESYSTEM="ext4"
+              LOG_FILE="/var/log/auto-mount.log"
+
+              # Logging function
+              log() {
+                  echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+              }
+
+              # Create monitoring directory
+              mkdir -p $MOUNT_POINT
+              mkdir -p /opt/monitoring
+
+              # Store bucket configuration
+              cat > /opt/monitoring/buckets.yaml <<END
+              mimir_bucket: ${MIMIR_BUCKET}
+              loki_bucket: ${LOKI_BUCKET}
+              tempo_bucket: ${TEMPO_BUCKET}
+              backup_bucket: ${BACKUP_BUCKET}
+              END
+
+              # Setup ansible user
+              groupadd ansible || true
+              useradd -m -s /bin/bash -g ansible ansible || true
+              usermod -aG sudo ansible
+              echo 'ansible ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ansible
+
+              # Setup SSH keys
+              mkdir -p /home/ansible/.ssh
+              chmod 700 /home/ansible/.ssh
+              chown ansible:ansible /home/ansible/.ssh
+
+              cat > /home/ansible/.ssh/ansible <<END
+              ${SSHKeyResource.PrivateKey}
+              END
+              cat > /home/ansible/.ssh/ansible.pub <<END
+              ${SSHKeyResource.PublicKey}
+              END
+              cp /home/ansible/.ssh/ansible.pub /home/ansible/.ssh/authorized_keys
+
+              cat > /home/ansible/.ssh/config <<END
+              Host *
+                StrictHostKeyChecking no
+                ForwardAgent yes
+                ControlPath ~/.ssh/%C
+                ControlMaster auto
+                ControlPersist 600
+                ServerAliveInterval 60
+                ServerAliveCountMax 2
+              END
+
+              # Fix permissions
+              chown -R ansible:ansible /home/ansible/.ssh/
+              chmod 600 /home/ansible/.ssh/ansible
+              chmod 600 /home/ansible/.ssh/config
+              chmod 600 /home/ansible/.ssh/authorized_keys
+              chmod 644 /home/ansible/.ssh/ansible.pub
+
+              # Copy SSH keys to root
+              mkdir -p /root/.ssh
+              cp /home/ansible/.ssh/ansible* /root/.ssh/
+              cp /home/ansible/.ssh/authorized_keys /root/.ssh/
+              cp /home/ansible/.ssh/config /root/.ssh/
+              chmod 600 /root/.ssh/ansible
+              chmod 600 /root/.ssh/config
+              chmod 600 /root/.ssh/authorized_keys
+
+              # Environment variables
+              ansible_role=tag_Role_$(echo ${Role} | tr - _)
+              ansible_stack=tag_Stack_$(echo ${AWS::StackName} | tr - _)
+              cat > /etc/profile.d/ansible.sh <<END
+              export CLOUD_ENVIRONMENT=aws
+              export ANSIBLE_ROLE=$ansible_role
+              export ANSIBLE_USER=ansible
+              export ANSIBLE_INVENTORY="/opt/ansible-monitoring/inventory/aws_ec2.yaml"
+              export ANSIBLE_OPENTELEMETRY_ENABLED=true
+              END
+
+              cat > /etc/default/wizard <<END
+              CLOUD_ENVIRONMENT=aws
+              ANSIBLE_ROLE=$ansible_role
+              ANSIBLE_USER=ansible
+              ANSIBLE_INVENTORY="/opt/ansible-monitoring/inventory/aws_ec2.yaml"
+              MIMIR_BUCKET=${MIMIR_BUCKET}
+              LOKI_BUCKET=${LOKI_BUCKET}
+              TEMPO_BUCKET=${TEMPO_BUCKET}
+              BACKUP_BUCKET=${BACKUP_BUCKET}
+              ANSIBLE_STACK=$ansible_stack
+              ANSIBLE_OPENTELEMETRY_ENABLED=true
+              END
+
+              echo "Monitoring instance initialization complete"
+            - MIMIR_BUCKET: !If [ShouldCreateMimirBucket, !Ref MimirBucket, !Ref MimirBucketName]
+              LOKI_BUCKET: !If [ShouldCreateLokiBucket, !Ref LokiBucket, !Ref LokiBucketName]
+              TEMPO_BUCKET: !If [ShouldCreateTempoBucket, !Ref TempoBucket, !Ref TempoBucketName]
+              BACKUP_BUCKET: !If [ShouldCreateBackupBucket, !Ref BackupBucket, !Ref BackupBucketName]
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-monitoring'
+        - Key: Role
+          Value: !Ref Role
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: mimir_bucket
+          Value: !If [ShouldCreateMimirBucket, !Ref MimirBucket, !Ref MimirBucketName]
+        - Key: loki_bucket
+          Value: !If [ShouldCreateLokiBucket, !Ref LokiBucket, !Ref LokiBucketName]
+        - Key: tempo_bucket
+          Value: !If [ShouldCreateTempoBucket, !Ref TempoBucket, !Ref TempoBucketName]
+        - Key: backup_bucket
+          Value: !If [ShouldCreateBackupBucket, !Ref BackupBucket, !Ref BackupBucketName]
+        - Key: Stack
+          Value: !Sub '${AWS::StackName}'
+
+  # Elastic IP (optional)
+  MonitoringEIP:
+    Type: AWS::EC2::EIP
+    Condition: CreateEIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref MonitoringInstance
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-eip'
+
+Outputs:
+  InstanceId:
+    Description: ID of the monitoring instance
+    Value: !Ref MonitoringInstance
+
+  InstancePrivateIp:
+    Description: Private IP address of the monitoring instance
+    Value: !GetAtt MonitoringInstance.PrivateIp
+
+  InstancePublicIp:
+    Description: Public IP address of the monitoring instance
+    Value: !GetAtt MonitoringInstance.PublicIp
+
+  ElasticIp:
+    Description: Elastic IP address (if enabled)
+    Value: !If [CreateEIP, !Ref MonitoringEIP, '']
+
+  SecurityGroupId:
+    Description: ID of the monitoring security group
+    Value: !Ref MonitoringSecurityGroup
+
+  IamRoleArn:
+    Description: ARN of the IAM role
+    Value: !GetAtt MonitoringRole.Arn
+
+  IamInstanceProfileName:
+    Description: Name of the IAM instance profile
+    Value: !Ref MonitoringInstanceProfile
+
+  VpcId:
+    Description: VPC ID where instance is deployed
+    Value: !If
+      - UseDefaultVpc
+      - !GetAtt DefaultVpcCustomResource.VpcId
+      - !Ref VpcId
+
+  SubnetId:
+    Description: Subnet ID where instance is deployed
+    Value: !If
+      - UseDefaultSubnet
+      - !If
+        - UseDefaultVpc
+        - !GetAtt DefaultVpcCustomResource.SubnetId
+        - 'Using default subnet'
+      - !Ref SubnetId
+
+  MonitoringEndpoints:
+    Description: Endpoints for monitoring services
+    Value: !Sub |
+      wizard: https://${MonitoringInstance.PublicIp}:9443
+      grafana: https://${MonitoringInstance.PublicIp}:443/grafana/
+      loki: http://${MonitoringInstance.PublicIp}/loki
+      prometheus: http://${MonitoringInstance.PublicIp}/prometheus
+
+  BucketConfiguration:
+    Description: S3 bucket names configured for this stack
+    Value: !Sub
+      - |
+        mimir: ${MIMIR_BUCKET}
+        loki: ${LOKI_BUCKET}
+        tempo: ${TEMPO_BUCKET}
+        backup: ${BACKUP_BUCKET}
+      - MIMIR_BUCKET: !If [ShouldCreateMimirBucket, !Ref MimirBucket, !Ref MimirBucketName]
+        LOKI_BUCKET: !If [ShouldCreateLokiBucket, !Ref LokiBucket, !Ref LokiBucketName]
+        TEMPO_BUCKET: !If [ShouldCreateTempoBucket, !Ref TempoBucket, !Ref TempoBucketName]
+        BACKUP_BUCKET: !If [ShouldCreateBackupBucket, !Ref BackupBucket, !Ref BackupBucketName]

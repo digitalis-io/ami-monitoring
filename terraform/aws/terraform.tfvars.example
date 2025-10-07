@@ -1,0 +1,94 @@
+# Example Terraform variables file for AWS monitoring stack
+# Copy this file to terraform.tfvars and customize the values
+
+# Required: Basic Configuration
+region     = "us-east-1"
+vpc_id     = "vpc-0123456789abcdef0"
+subnet_ids = ["subnet-0123456789abcdef0", "subnet-0123456789abcdef1"]
+
+# Project Information
+project_name = "dm"
+environment  = "production"
+
+# Instance Configuration
+instance_count   = 2
+instance_type    = "t3.large"
+key_pair_name    = "my-monitoring-keypair"
+root_volume_size = 50
+data_volume_size = 200
+
+# Optional: Custom AMI (defaults to latest Ubuntu 22.04)
+# ami_id = "ami-0123456789abcdef0"
+
+# S3 Buckets for Storage
+enable_mimir_bucket  = true
+enable_loki_bucket   = true
+enable_tempo_bucket  = true
+enable_backup_bucket = true
+
+# Optional: Custom bucket names (auto-generated if not specified)
+# mimir_bucket_name  = "my-custom-mimir-bucket"
+# loki_bucket_name   = "my-custom-loki-bucket"
+# tempo_bucket_name  = "my-custom-tempo-bucket"
+# backup_bucket_name = "my-custom-backup-bucket"
+
+# S3 Bucket Configuration
+bucket_versioning    = true
+bucket_encryption    = true
+bucket_force_destroy = false
+
+# Network Load Balancer
+enable_load_balancer   = true
+load_balancer_internal = false
+
+# Optional: Different subnets for load balancer
+# lb_subnet_ids = ["subnet-public-1", "subnet-public-2"]
+
+# Security Configuration
+# By default, all traffic within VPC is allowed
+# Add external CIDR blocks if you need access from outside the VPC
+allowed_external_cidrs = []
+# Example for external access:
+# allowed_external_cidrs = ["203.0.113.0/24", "198.51.100.0/24"]
+
+# Optional: Specify VPC CIDR if not auto-detected
+# vpc_cidr = "10.0.0.0/16"
+
+# Auto-Scaling Configuration (alternative to fixed instance count)
+# enable_auto_scaling = true
+# min_size            = 2
+# max_size            = 6
+# desired_capacity    = 3
+# health_check_grace_period = 300
+
+# Monitoring and Logging
+enable_monitoring      = true
+enable_cloudwatch_logs = true
+cloudwatch_retention_days = 30
+
+# Enable CloudWatch datasource permissions for Grafana
+enable_cloudwatch_datasource = true
+
+# Systems Manager Access
+enable_ssm = true
+
+# Elastic IPs (for fixed instance deployment)
+# enable_eip = true
+
+# Protection
+enable_termination_protection = false
+
+# Optional: Use existing IAM instance profile
+# iam_instance_profile = "existing-profile-name"
+
+# Optional: Custom user data script
+# user_data_script = file("${path.root}/custom_user_data.sh")
+
+# Resource Tags
+tags = {
+  Project     = "Monitoring"
+  Team        = "DevOps"
+  Environment = "Production"
+  CostCenter  = "Infrastructure"
+  ManagedBy   = "Terraform"
+}

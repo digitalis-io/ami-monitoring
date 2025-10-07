@@ -1,0 +1,1713 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Monitoring Stack - Production-Ready with Auto-Scaling and Load Balancer Support'
+
+Parameters:
+  # Project Configuration
+  ProjectName:
+    Type: String
+    Default: dm
+    Description: 'Project name used as prefix for all resource names. Keep it short and lowercase. Used in bucket names and resource tags. Example: mycompany-monitoring'
+    AllowedPattern: '^[a-z0-9-]{1,20}$'
+    ConstraintDescription: 'Must be 1-20 characters, lowercase letters, numbers, and hyphens only'
+
+  Role:
+    Type: String
+    Default: digitalis-monitoring
+    Description: 'Role/purpose tag for identifying resources. Appears in AWS resource tags for organization, cost tracking, and automation. Example: production-monitoring'
+
+  Environment:
+    Type: String
+    Default: prod
+    Description: 'Environment type for this deployment. Used for resource tagging, naming, and cost allocation. Choose: dev (development/testing), staging (pre-production), or prod (production)'
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+
+  # Network Configuration (Required)
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: 'Existing VPC ID where monitoring instances will be deployed. Ensure the VPC has internet access (via NAT Gateway or IGW). Example: vpc-0123456789abcdef0'
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: 'List of existing subnet IDs for monitoring instances. Use at least 2 subnets in different availability zones for high availability. Private subnets recommended for production. Example: subnet-abc123,subnet-def456'
+
+  LbSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: 'List of existing subnet IDs for load balancer deployment. Use public subnets for external access or private subnets for internal-only access. If empty, uses same subnets as instances. Example: subnet-public1,subnet-public2'
+
+  # Instance Configuration
+  InstanceCount:
+    Type: Number
+    Default: 1
+    Description: 'Number of monitoring instances to create (ignored if auto-scaling is enabled). For production, use 2-3 instances or enable auto-scaling for high availability. Set to 0 if using only auto-scaling'
+    MinValue: 0
+    MaxValue: 10
+
+  InstanceType:
+    Type: String
+    Default: t3.medium
+    Description: 'EC2 instance type for monitoring servers. Recommendations: t3.small (~$15/mo, testing only), t3.medium (~$30/mo, small deployments), t3.large (~$60/mo, medium deployments), t3.xlarge (~$120/mo, production), t3.2xlarge (~$240/mo, large production)'
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t3.large
+      - t3.xlarge
+      - t3.2xlarge
+
+  RootVolumeSize:
+    Type: Number
+    Default: 30
+    Description: 'Size of the root/OS volume in GB (per instance). Contains operating system and application files. Default 30GB is usually sufficient. Increase if you have many applications'
+    MinValue: 20
+    MaxValue: 1000
+
+  DataVolumeSize:
+    Type: Number
+    Default: 50
+    Description: 'Size of the data volume in GB (per instance) for local metrics and logs storage. Increase based on retention needs and metric volume. For production with heavy metrics, consider 200GB+'
+    MinValue: 10
+    MaxValue: 16000
+
+  KeyPairName:
+    Type: String
+    Default: ''
+    Description: 'EC2 SSH key pair name for SSH access to instances. Optional - only needed if you want traditional SSH access. Leave empty to rely on SSM Session Manager. Must be an existing key pair in this region'
+
+  AmiId:
+    Type: String
+    Default: ''
+    Description: 'Custom AMI ID to use instead of the latest Ubuntu 22.04. Leave empty to automatically use the latest Ubuntu 22.04 LTS AMI from AWS Systems Manager. Only specify if you have a custom image. Example: ami-0123456789abcdef0'
+
+  # Load Balancer Configuration
+  EnableLoadBalancer:
+    Type: String
+    Default: 'false'
+    Description: 'Create a Network Load Balancer to distribute traffic across monitoring instances. Recommended for production deployments with multiple instances. Provides single endpoint for all services. Adds ~$16/month cost'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  LoadBalancerInternal:
+    Type: String
+    Default: 'false'
+    Description: 'Make load balancer internal (VPC-only access). Set to true if monitoring should only be accessed from within your VPC/private network. Set to false for public internet access'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  # S3 Storage Configuration
+  EnableMimirBucket:
+    Type: String
+    Default: 'false'
+    Description: 'Create S3 bucket for Mimir long-term metrics storage. Enables metrics retention beyond local storage. Bucket will be encrypted and versioned. Recommended for production'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  MimirBucketName:
+    Type: String
+    Default: ''
+    Description: 'Custom name for Mimir S3 bucket. Leave empty to auto-generate a unique name using project/environment prefix. Must be globally unique if specified. Example: mycompany-prod-mimir'
+
+  EnableLokiBucket:
+    Type: String
+    Default: 'false'
+    Description: 'Create S3 bucket for Loki long-term log storage. Enables log retention beyond local storage. Bucket will be encrypted and versioned. Recommended for production'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  LokiBucketName:
+    Type: String
+    Default: ''
+    Description: 'Custom name for Loki S3 bucket. Leave empty to auto-generate a unique name using project/environment prefix. Must be globally unique if specified. Example: mycompany-prod-loki'
+
+  EnableTempoBucket:
+    Type: String
+    Default: 'false'
+    Description: 'Create S3 bucket for Tempo distributed tracing storage. Enables trace retention beyond local storage. Bucket will be encrypted and versioned. Recommended if using distributed tracing'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  TempoBucketName:
+    Type: String
+    Default: ''
+    Description: 'Custom name for Tempo S3 bucket. Leave empty to auto-generate a unique name using project/environment prefix. Must be globally unique if specified. Example: mycompany-prod-tempo'
+
+  EnableBackupBucket:
+    Type: String
+    Default: 'false'
+    Description: 'Create S3 bucket for configuration backups. Used to store Grafana dashboards, alert rules, and other configuration backups. Bucket will be encrypted and versioned with 60-day lifecycle'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  BackupBucketName:
+    Type: String
+    Default: ''
+    Description: 'Custom name for backup S3 bucket. Leave empty to auto-generate a unique name using project/environment prefix. Must be globally unique if specified. Example: mycompany-prod-backups'
+
+  BucketForceDestroy:
+    Type: String
+    Default: 'false'
+    Description: 'Allow CloudFormation to delete S3 buckets even if they contain data. DANGER: Set to true only for dev/test environments. Production should keep false to prevent accidental data loss'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  BucketVersioning:
+    Type: String
+    Default: 'true'
+    Description: 'Enable versioning on all S3 buckets. Keeps historical versions of objects for data protection and recovery. Recommended: keep enabled for production. Adds ~20% storage cost'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  BucketEncryption:
+    Type: String
+    Default: 'true'
+    Description: 'Enable AES-256 server-side encryption on all S3 buckets. Encrypts data at rest for security compliance. Recommended: keep enabled. No additional cost'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  # Security Configuration
+  AllowedExternalCidrs:
+    Type: CommaDelimitedList
+    Default: '0.0.0.0/0'
+    Description: 'Comma-separated list of CIDR blocks allowed to access monitoring services from outside the VPC. Use 0.0.0.0/0 for public access (not recommended for production). For security, restrict to your office IP: x.x.x.x/32. Example: 203.0.113.0/24,198.51.100.50/32'
+
+  EnableCloudWatchLogs:
+    Type: String
+    Default: 'true'
+    Description: Enable CloudWatch logs for instances
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  EnableCloudWatchDatasource:
+    Type: String
+    Default: 'true'
+    Description: Enable IAM permissions for Grafana CloudWatch datasource
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  CloudWatchRetentionDays:
+    Type: Number
+    Default: 30
+    Description: CloudWatch logs retention in days
+    AllowedValues:
+      - 1
+      - 3
+      - 5
+      - 7
+      - 14
+      - 30
+      - 60
+      - 90
+      - 120
+      - 150
+      - 180
+      - 365
+      - 400
+      - 545
+      - 731
+      - 1827
+      - 3653
+
+  EnableAutoScaling:
+    Type: String
+    Default: 'false'
+    Description: Enable auto-scaling group
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  MinSize:
+    Type: Number
+    Default: 1
+    Description: Minimum number of instances in ASG
+    MinValue: 0
+    MaxValue: 100
+
+  MaxSize:
+    Type: Number
+    Default: 3
+    Description: Maximum number of instances in ASG
+    MinValue: 1
+    MaxValue: 100
+
+  DesiredCapacity:
+    Type: Number
+    Default: 1
+    Description: Desired number of instances in ASG
+    MinValue: 0
+    MaxValue: 100
+
+  HealthCheckGracePeriod:
+    Type: Number
+    Default: 300
+    Description: Health check grace period in seconds
+    MinValue: 0
+    MaxValue: 7200
+
+  EnableEIP:
+    Type: String
+    Default: 'false'
+    Description: Attach Elastic IP to instances
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  VpcCidr:
+    Type: String
+    Default: ''
+    Description: VPC CIDR block for internal security group rules (if empty, will be fetched)
+
+  UserDataScript:
+    Type: String
+    Default: ''
+    Description: Custom user data script (Base64 encoded)
+
+  IamInstanceProfile:
+    Type: String
+    Default: ''
+    Description: IAM instance profile name (if empty, will create one)
+
+  EnableSSM:
+    Type: String
+    Default: 'true'
+    Description: Enable AWS Systems Manager access
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  EnableMonitoring:
+    Type: String
+    Default: 'true'
+    Description: Enable detailed monitoring
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  EnableTerminationProtection:
+    Type: String
+    Default: 'false'
+    Description: Enable termination protection
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  LatestUbuntuAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id
+    Description: Latest Ubuntu 22.04 AMI from SSM Parameter Store
+
+Conditions:
+  UseLatestAmi: !Equals [!Ref AmiId, '']
+  UseKeyPair: !Not [!Equals [!Ref KeyPairName, '']]
+  CreateLoadBalancer: !Equals [!Ref EnableLoadBalancer, 'true']
+  CreateInternalLB: !Equals [!Ref LoadBalancerInternal, 'true']
+  CreateMimirBucket: !Equals [!Ref EnableMimirBucket, 'true']
+  CreateLokiBucket: !Equals [!Ref EnableLokiBucket, 'true']
+  CreateTempoBucket: !Equals [!Ref EnableTempoBucket, 'true']
+  CreateBackupBucket: !Equals [!Ref EnableBackupBucket, 'true']
+  EnableBucketVersioning: !Equals [!Ref BucketVersioning, 'true']
+  EnableBucketEncryption: !Equals [!Ref BucketEncryption, 'true']
+  HasExternalAccess: !Not [!Equals [!Join ['', !Ref AllowedExternalCidrs], '']]
+  CreateCloudWatchLogs: !Equals [!Ref EnableCloudWatchLogs, 'true']
+  CreateCloudWatchPermissions: !Equals [!Ref EnableCloudWatchDatasource, 'true']
+  CreateAutoScaling: !Equals [!Ref EnableAutoScaling, 'true']
+  CreateInstances: !Not [!Equals [!Ref EnableAutoScaling, 'true']]
+  CreateEIP: !And
+    - !Equals [!Ref EnableEIP, 'true']
+    - !Not [!Equals [!Ref EnableAutoScaling, 'true']]
+  CreateIamRole: !Equals [!Ref IamInstanceProfile, '']
+  EnableSSMAccess: !Equals [!Ref EnableSSM, 'true']
+  EnableDetailedMonitoring: !Equals [!Ref EnableMonitoring, 'true']
+  EnableProtection: !Equals [!Ref EnableTerminationProtection, 'true']
+  UseLbSubnets: !Not [!Equals [!Join ['', !Ref LbSubnetIds], '']]
+  UseCustomUserData: !Not [!Equals [!Ref UserDataScript, '']]
+  UseProvidedVpcCidr: !Not [!Equals [!Ref VpcCidr, '']]
+  NotUseProvidedVpcCidr: !Equals [!Ref VpcCidr, '']
+
+  CreateMimirBucketVersioning: !And
+    - !Condition CreateMimirBucket
+    - !Condition EnableBucketVersioning
+  CreateMimirBucketEncryption: !And
+    - !Condition CreateMimirBucket
+    - !Condition EnableBucketEncryption
+  CreateLokiBucketVersioning: !And
+    - !Condition CreateLokiBucket
+    - !Condition EnableBucketVersioning
+  CreateLokiBucketEncryption: !And
+    - !Condition CreateLokiBucket
+    - !Condition EnableBucketEncryption
+  CreateTempoBucketVersioning: !And
+    - !Condition CreateTempoBucket
+    - !Condition EnableBucketVersioning
+  CreateTempoBucketEncryption: !And
+    - !Condition CreateTempoBucket
+    - !Condition EnableBucketEncryption
+  CreateBackupBucketVersioning: !And
+    - !Condition CreateBackupBucket
+    - !Condition EnableBucketVersioning
+  CreateBackupBucketEncryption: !And
+    - !Condition CreateBackupBucket
+    - !Condition EnableBucketEncryption
+  CreateLoadBalancerAndInstances: !And
+    - !Condition CreateLoadBalancer
+    - !Condition CreateInstances
+  CreateIamRoleWithCloudWatch: !And
+    - !Condition CreateIamRole
+    - !Condition CreateCloudWatchPermissions
+  CreateIamRoleWithSSM: !And
+    - !Condition CreateIamRole
+    - !Condition EnableSSMAccess
+  CreateIamRoleWithCloudWatchLogs: !And
+    - !Condition CreateIamRole
+    - !Condition CreateCloudWatchLogs
+  UseMimirBucketName: !Not [!Equals [!Ref MimirBucketName, '']]
+  UseLokiBucketName: !Not [!Equals [!Ref LokiBucketName, '']]
+  UseTempoBucketName: !Not [!Equals [!Ref TempoBucketName, '']]
+  UseBackupBucketName: !Not [!Equals [!Ref BackupBucketName, '']]
+
+Mappings:
+  ServicePorts:
+    Ports:
+      Wizard: 9443
+      Grafana: 443
+      Loki: 3100
+      OtelGrpc: 4317
+      OtelHttp: 4318
+      TempoHttp: 3200
+      TempoGrpc: 9095
+      Mimir: 9009
+      Prometheus: 9090
+      Alertmanager: 9093
+      MimirCluster: 7946
+
+Resources:
+  # Random suffix for bucket names
+  BucketSuffix:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt GenerateRandomFunction.Arn
+
+  GenerateRandomFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-RandomGenerator'
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt RandomGeneratorRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          import random
+          import string
+          import cfnresponse
+
+          def handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+
+                  random_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
+                  response_data = {'Suffix': random_suffix}
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+              except Exception as e:
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {}, str(e))
+
+  RandomGeneratorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # Security Group
+  MonitoringSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${ProjectName}-${Environment}-monitoring'
+      GroupDescription: Security group for monitoring stack
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: Allow all traffic from VPC
+          IpProtocol: -1
+          CidrIp: !If [UseProvidedVpcCidr, !Ref VpcCidr, !GetAtt VpcCidrCustomResource.Cidr]
+      SecurityGroupEgress:
+        - Description: Allow all outbound
+          IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-monitoring-sg'
+
+  # Self-referencing ingress rules (to avoid circular dependency)
+  SelfAllIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref MonitoringSecurityGroup
+      Description: Allow all from self
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref MonitoringSecurityGroup
+
+  SelfSSHIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref MonitoringSecurityGroup
+      Description: SSH between monitoring instances
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      SourceSecurityGroupId: !Ref MonitoringSecurityGroup
+
+  SelfMimirClusterIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref MonitoringSecurityGroup
+      Description: Mimir Cluster Communication
+      IpProtocol: tcp
+      FromPort: !FindInMap [ServicePorts, Ports, MimirCluster]
+      ToPort: !FindInMap [ServicePorts, Ports, MimirCluster]
+      SourceSecurityGroupId: !Ref MonitoringSecurityGroup
+
+  # External access rules (conditional)
+  ExternalWizardIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasExternalAccess
+    Properties:
+      GroupId: !Ref MonitoringSecurityGroup
+      Description: Wizard from external
+      IpProtocol: tcp
+      FromPort: !FindInMap [ServicePorts, Ports, Wizard]
+      ToPort: !FindInMap [ServicePorts, Ports, Wizard]
+      CidrIp: !Select [0, !Ref AllowedExternalCidrs]
+
+  ExternalSSHIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasExternalAccess
+    Properties:
+      GroupId: !Ref MonitoringSecurityGroup
+      Description: SSH from external
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp: !Select [0, !Ref AllowedExternalCidrs]
+
+  ExternalGrafanaIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasExternalAccess
+    Properties:
+      GroupId: !Ref MonitoringSecurityGroup
+      Description: Grafana HTTPS from external
+      IpProtocol: tcp
+      FromPort: !FindInMap [ServicePorts, Ports, Grafana]
+      ToPort: !FindInMap [ServicePorts, Ports, Grafana]
+      CidrIp: !Select [0, !Ref AllowedExternalCidrs]
+
+  ExternalLokiIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasExternalAccess
+    Properties:
+      GroupId: !Ref MonitoringSecurityGroup
+      Description: Loki from external
+      IpProtocol: tcp
+      FromPort: !FindInMap [ServicePorts, Ports, Loki]
+      ToPort: !FindInMap [ServicePorts, Ports, Loki]
+      CidrIp: !Select [0, !Ref AllowedExternalCidrs]
+
+  ExternalOtelGrpcIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasExternalAccess
+    Properties:
+      GroupId: !Ref MonitoringSecurityGroup
+      Description: OpenTelemetry gRPC from external
+      IpProtocol: tcp
+      FromPort: !FindInMap [ServicePorts, Ports, OtelGrpc]
+      ToPort: !FindInMap [ServicePorts, Ports, OtelGrpc]
+      CidrIp: !Select [0, !Ref AllowedExternalCidrs]
+
+  ExternalOtelHttpIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasExternalAccess
+    Properties:
+      GroupId: !Ref MonitoringSecurityGroup
+      Description: OpenTelemetry HTTP from external
+      IpProtocol: tcp
+      FromPort: !FindInMap [ServicePorts, Ports, OtelHttp]
+      ToPort: !FindInMap [ServicePorts, Ports, OtelHttp]
+      CidrIp: !Select [0, !Ref AllowedExternalCidrs]
+
+  ExternalTempoHttpIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasExternalAccess
+    Properties:
+      GroupId: !Ref MonitoringSecurityGroup
+      Description: Tempo HTTP from external
+      IpProtocol: tcp
+      FromPort: !FindInMap [ServicePorts, Ports, TempoHttp]
+      ToPort: !FindInMap [ServicePorts, Ports, TempoHttp]
+      CidrIp: !Select [0, !Ref AllowedExternalCidrs]
+
+  ExternalTempoGrpcIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasExternalAccess
+    Properties:
+      GroupId: !Ref MonitoringSecurityGroup
+      Description: Tempo gRPC from external
+      IpProtocol: tcp
+      FromPort: !FindInMap [ServicePorts, Ports, TempoGrpc]
+      ToPort: !FindInMap [ServicePorts, Ports, TempoGrpc]
+      CidrIp: !Select [0, !Ref AllowedExternalCidrs]
+
+  ExternalMimirIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasExternalAccess
+    Properties:
+      GroupId: !Ref MonitoringSecurityGroup
+      Description: Mimir from external
+      IpProtocol: tcp
+      FromPort: !FindInMap [ServicePorts, Ports, Mimir]
+      ToPort: !FindInMap [ServicePorts, Ports, Mimir]
+      CidrIp: !Select [0, !Ref AllowedExternalCidrs]
+
+  # VPC CIDR Custom Resource (to get VPC CIDR when not provided)
+  VpcCidrCustomResource:
+    Type: AWS::CloudFormation::CustomResource
+    Condition: NotUseProvidedVpcCidr
+    Properties:
+      ServiceToken: !GetAtt VpcCidrFunction.Arn
+      VpcId: !Ref VpcId
+
+  VpcCidrFunction:
+    Type: AWS::Lambda::Function
+    Condition: NotUseProvidedVpcCidr
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-VpcCidrLookup'
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt VpcCidrFunctionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+
+                  vpc_id = event['ResourceProperties']['VpcId']
+                  ec2 = boto3.client('ec2')
+                  response = ec2.describe_vpcs(VpcIds=[vpc_id])
+                  vpc_cidr = response['Vpcs'][0]['CidrBlock']
+
+                  response_data = {'Cidr': vpc_cidr}
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+              except Exception as e:
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {}, str(e))
+
+  VpcCidrFunctionRole:
+    Type: AWS::IAM::Role
+    Condition: NotUseProvidedVpcCidr
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DescribeVpc
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeVpcs
+                Resource: '*'
+
+  # IAM Role and Instance Profile
+  MonitoringRole:
+    Type: AWS::IAM::Role
+    Condition: CreateIamRole
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-monitoring-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !If [EnableSSMAccess, 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore', !Ref 'AWS::NoValue']
+        - !If [CreateCloudWatchLogs, 'arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy', !Ref 'AWS::NoValue']
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-monitoring-role'
+
+  MonitoringCorePolicy:
+    Type: AWS::IAM::RolePolicy
+    Condition: CreateIamRole
+    Properties:
+      RoleName: !Ref MonitoringRole
+      PolicyName: !Sub '${ProjectName}-${Environment}-core-access'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowReadingTagsInstancesRegionsFromEC2
+            Effect: Allow
+            Action:
+              - ec2:DescribeTags
+              - ec2:DescribeInstances
+              - ec2:DescribeRegions
+            Resource: '*'
+          - !If [CreateMimirBucket, {Effect: Allow, Action: [s3:ListBucket, s3:GetObject, s3:PutObject, s3:DeleteObject], Resource: [!GetAtt MimirBucket.Arn, !Sub '${MimirBucket.Arn}/*']}, !Ref AWS::NoValue]
+          - !If [CreateLokiBucket, {Effect: Allow, Action: [s3:ListBucket, s3:GetObject, s3:PutObject, s3:DeleteObject], Resource: [!GetAtt LokiBucket.Arn, !Sub '${LokiBucket.Arn}/*']}, !Ref AWS::NoValue]
+          - !If [CreateTempoBucket, {Effect: Allow, Action: [s3:ListBucket, s3:GetObject, s3:PutObject, s3:DeleteObject], Resource: [!GetAtt TempoBucket.Arn, !Sub '${TempoBucket.Arn}/*']}, !Ref AWS::NoValue]
+          - !If [CreateBackupBucket, {Effect: Allow, Action: [s3:ListBucket, s3:GetObject, s3:PutObject, s3:DeleteObject], Resource: [!GetAtt BackupBucket.Arn, !Sub '${BackupBucket.Arn}/*']}, !Ref AWS::NoValue]
+
+  MonitoringCloudWatchPolicy:
+    Type: AWS::IAM::RolePolicy
+    Condition: CreateIamRoleWithCloudWatch
+    Properties:
+      RoleName: !Ref MonitoringRole
+      PolicyName: !Sub '${ProjectName}-${Environment}-cloudwatch'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowReadingMetricsFromCloudWatch
+            Effect: Allow
+            Action:
+              - cloudwatch:DescribeAlarmsForMetric
+              - cloudwatch:DescribeAlarmHistory
+              - cloudwatch:DescribeAlarms
+              - cloudwatch:ListMetrics
+              - cloudwatch:GetMetricData
+              - cloudwatch:GetMetricStatistics
+              - cloudwatch:GetMetricWidgetImage
+              - cloudwatch:ListDashboards
+            Resource: '*'
+          - Sid: AllowReadingLogsFromCloudWatch
+            Effect: Allow
+            Action:
+              - logs:DescribeLogGroups
+              - logs:GetLogGroupFields
+              - logs:StartQuery
+              - logs:StopQuery
+              - logs:GetQueryResults
+              - logs:GetLogEvents
+            Resource: '*'
+          - Sid: AllowReadingResourcesForTags
+            Effect: Allow
+            Action:
+              - tag:GetResources
+            Resource: '*'
+
+
+  MonitoringInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Condition: CreateIamRole
+    Properties:
+      InstanceProfileName: !Sub '${ProjectName}-${Environment}-monitoring-profile'
+      Roles:
+        - !Ref MonitoringRole
+
+  # S3 Buckets
+  MimirBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateMimirBucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !If [UseMimirBucketName, !Ref MimirBucketName, !Sub '${ProjectName}-${Environment}-mimir-${BucketSuffix.Suffix}']
+      Tags:
+        - Key: Name
+          Value: !If [UseMimirBucketName, !Ref MimirBucketName, !Sub '${ProjectName}-${Environment}-mimir-${BucketSuffix.Suffix}']
+        - Key: Purpose
+          Value: Mimir Storage
+
+  MimirBucketVersioning:
+    Type: AWS::S3::BucketVersioning
+    Condition: CreateMimirBucketVersioning
+    Properties:
+      Bucket: !Ref MimirBucket
+      VersioningConfiguration:
+        Status: Enabled
+
+  MimirBucketEncryption:
+    Type: AWS::S3::BucketEncryption
+    Condition: CreateMimirBucketEncryption
+    Properties:
+      Bucket: !Ref MimirBucket
+      ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+
+  LokiBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateLokiBucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !If [UseLokiBucketName, !Ref LokiBucketName, !Sub '${ProjectName}-${Environment}-loki-${BucketSuffix.Suffix}']
+      Tags:
+        - Key: Name
+          Value: !If [UseLokiBucketName, !Ref LokiBucketName, !Sub '${ProjectName}-${Environment}-loki-${BucketSuffix.Suffix}']
+        - Key: Purpose
+          Value: Loki Storage
+
+  LokiBucketVersioning:
+    Type: AWS::S3::BucketVersioning
+    Condition: CreateLokiBucketVersioning
+    Properties:
+      Bucket: !Ref LokiBucket
+      VersioningConfiguration:
+        Status: Enabled
+
+  LokiBucketEncryption:
+    Type: AWS::S3::BucketEncryption
+    Condition: CreateLokiBucketEncryption
+    Properties:
+      Bucket: !Ref LokiBucket
+      ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+
+  TempoBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateTempoBucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !If [UseTempoBucketName, !Ref TempoBucketName, !Sub '${ProjectName}-${Environment}-tempo-${BucketSuffix.Suffix}']
+      Tags:
+        - Key: Name
+          Value: !If [UseTempoBucketName, !Ref TempoBucketName, !Sub '${ProjectName}-${Environment}-tempo-${BucketSuffix.Suffix}']
+        - Key: Purpose
+          Value: Tempo Storage
+
+  TempoBucketVersioning:
+    Type: AWS::S3::BucketVersioning
+    Condition: CreateTempoBucketVersioning
+    Properties:
+      Bucket: !Ref TempoBucket
+      VersioningConfiguration:
+        Status: Enabled
+
+  TempoBucketEncryption:
+    Type: AWS::S3::BucketEncryption
+    Condition: CreateTempoBucketEncryption
+    Properties:
+      Bucket: !Ref TempoBucket
+      ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateBackupBucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !If [UseBackupBucketName, !Ref BackupBucketName, !Sub '${ProjectName}-${Environment}-backups-${BucketSuffix.Suffix}']
+      Tags:
+        - Key: Name
+          Value: !If [UseBackupBucketName, !Ref BackupBucketName, !Sub '${ProjectName}-${Environment}-backups-${BucketSuffix.Suffix}']
+        - Key: Purpose
+          Value: Backups
+
+  BackupBucketVersioning:
+    Type: AWS::S3::BucketVersioning
+    Condition: CreateBackupBucketVersioning
+    Properties:
+      Bucket: !Ref BackupBucket
+      VersioningConfiguration:
+        Status: Enabled
+
+  BackupBucketEncryption:
+    Type: AWS::S3::BucketEncryption
+    Condition: CreateBackupBucketEncryption
+    Properties:
+      Bucket: !Ref BackupBucket
+      ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+
+  # CloudWatch Log Group
+  MonitoringLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: CreateCloudWatchLogs
+    Properties:
+      LogGroupName: !Sub '/aws/ec2/${ProjectName}-${Environment}'
+      RetentionInDays: !Ref CloudWatchRetentionDays
+
+  # SSH Key Generation
+  SSHKeyFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-SSHKeyGenerator'
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt SSHKeyFunctionRole.Arn
+      Timeout: 30
+      Layers:
+        # Use Klayers public layer for cryptography
+        # Find ARN at: https://github.com/keithrozario/Klayers
+        - arn:aws:lambda:us-east-1:770693421928:layer:Klayers-p312-cryptography:17
+      Code:
+        ZipFile: |
+          import json
+          import cfnresponse
+          from cryptography.hazmat.primitives import serialization
+          from cryptography.hazmat.primitives.asymmetric import ed25519
+
+          def handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+
+                  # Generate Ed25519 key pair
+                  private_key = ed25519.Ed25519PrivateKey.generate()
+
+                  # Serialize private key to OpenSSH format
+                  private_key_pem = private_key.private_bytes(
+                      encoding=serialization.Encoding.PEM,
+                      format=serialization.PrivateFormat.OpenSSH,
+                      encryption_algorithm=serialization.NoEncryption()
+                  ).decode('utf-8')
+
+                  # Get public key and serialize to OpenSSH format
+                  public_key = private_key.public_key()
+                  public_key_openssh = public_key.public_bytes(
+                      encoding=serialization.Encoding.OpenSSH,
+                      format=serialization.PublicFormat.OpenSSH
+                  ).decode('utf-8')
+
+                  # Add comment to public key (like ssh-keygen does)
+                  public_key_with_comment = f"{public_key_openssh} ansible@monitoring"
+
+                  response_data = {
+                      'PrivateKey': private_key_pem,
+                      'PublicKey': public_key_with_comment
+                  }
+
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+              except Exception as e:
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {}, str(e))
+
+  SSHKeyFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  SSHKeyResource:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt SSHKeyFunction.Arn
+
+
+  # EC2 Instances (non-autoscaling)
+  MonitoringInstance:
+    Type: AWS::EC2::Instance
+    Condition: CreateInstances
+    Properties:
+      ImageId: !If [UseLatestAmi, !Ref LatestUbuntuAmi, !Ref AmiId]
+      InstanceType: !Ref InstanceType
+      SubnetId: !Select [0, !Ref SubnetIds]
+      SecurityGroupIds:
+        - !Ref MonitoringSecurityGroup
+      KeyName: !If [UseKeyPair, !Ref KeyPairName, !Ref 'AWS::NoValue']
+      IamInstanceProfile: !If [CreateIamRole, !Ref MonitoringInstanceProfile, !Ref IamInstanceProfile]
+      Monitoring: !Ref EnableMonitoring
+      DisableApiTermination: !Ref EnableTerminationProtection
+      InstanceInitiatedShutdownBehavior: stop
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: !Ref RootVolumeSize
+            Encrypted: true
+            DeleteOnTermination: true
+        - DeviceName: /dev/sdf
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: !Ref DataVolumeSize
+            Encrypted: true
+            DeleteOnTermination: true
+      UserData:
+        Fn::If:
+          - UseCustomUserData
+          - !Ref UserDataScript
+          - !Base64
+              Fn::Sub: |
+                #!/bin/bash
+                set -e
+
+                # Configuration
+                MOUNT_POINT="/data"
+                FILESYSTEM="ext4"
+                LOG_FILE="/var/log/auto-mount.log"
+
+                # Logging function
+                log() {
+                    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+                }
+
+                # Function to check if a device is the root device or part of root filesystem
+                is_root_device() {
+                    local device="$1"
+                    local root_device
+
+                    # Get the root device (remove partition number if present)
+                    root_device=$(findmnt -n -o SOURCE / | sed 's/[0-9]*$//')
+
+                    # Check if the device is the root device or a partition of it
+                    if [[ "$device" == "$root_device"* ]] || [[ "$root_device" == "$device"* ]]; then
+                        return 0  # true - it's a root device
+                    fi
+
+                    return 1  # false - not a root device
+                }
+
+                # Function to check if device is already mounted
+                is_mounted() {
+                    local device="$1"
+                    mountpoint=$(findmnt -n -o TARGET "$device" 2>/dev/null || echo "")
+                    [[ -n "$mountpoint" ]]
+                }
+
+                # Function to format and mount device
+                format_and_mount() {
+                    local device="$1"
+
+                    log "Formatting device $device with $FILESYSTEM filesystem"
+
+                    # Create filesystem
+                    if ! mkfs."$FILESYSTEM" -F "$device" >> "$LOG_FILE" 2>&1; then
+                        log "ERROR: Failed to format $device"
+                        return 1
+                    fi
+
+                    # Create mount point
+                    if [[ ! -d "$MOUNT_POINT" ]]; then
+                        mkdir -p "$MOUNT_POINT"
+                        log "Created mount point $MOUNT_POINT"
+                    fi
+
+                    # Mount the device
+                    if ! mount "$device" "$MOUNT_POINT"; then
+                        log "ERROR: Failed to mount $device to $MOUNT_POINT"
+                        return 1
+                    fi
+
+                    log "Successfully mounted $device to $MOUNT_POINT"
+
+                    # Get UUID for persistent mounting
+                    local uuid
+                    uuid=$(blkid -s UUID -o value "$device")
+
+                    # Add to /etc/fstab for persistent mounting
+                    if ! grep -q "$uuid" /etc/fstab; then
+                        echo "UUID=$uuid $MOUNT_POINT $FILESYSTEM defaults,nofail 0 2" >> /etc/fstab
+                        log "Added $device (UUID=$uuid) to /etc/fstab"
+                    fi
+
+                    # Set appropriate permissions
+                    chmod 755 "$MOUNT_POINT"
+
+                    return 0
+                }
+
+                # Main execution
+                mount_data() {
+                    log "Starting auto-mount script"
+
+                    # Wait for devices to be ready
+                    sleep 5
+
+                    # Get list of all block devices (excluding loop, ram, and sr devices)
+                    local devices
+                    devices=$(lsblk -dpno NAME | grep -E '^/dev/(sd|xvd|nvme)' || true)
+
+                    if [[ -z "$devices" ]]; then
+                        log "No suitable block devices found"
+                        exit 0
+                    fi
+
+                    local mounted_count=0
+
+                    # Process each device
+                    while IFS= read -r device; do
+                        [[ -z "$device" ]] && continue
+
+                        log "Checking device: $device"
+
+                        # Skip if it's the root device
+                        if is_root_device "$device"; then
+                            log "Skipping $device - it's the root device or part of root filesystem"
+                            continue
+                        fi
+
+                        # Skip if already mounted
+                        if is_mounted "$device"; then
+                            local current_mount
+                            current_mount=$(findmnt -n -o TARGET "$device")
+                            log "Skipping $device - already mounted at $current_mount"
+                            continue
+                        fi
+
+                        # Check if device has partitions
+                        local partitions
+                        partitions=$(lsblk -no NAME "$device" | tail -n +2 | sed "s|^|/dev/|" || true)
+
+                        if [[ -n "$partitions" ]]; then
+                            log "Device $device has partitions, checking partitions instead"
+                            while IFS= read -r partition; do
+                                [[ -z "$partition" ]] && continue
+
+                                if ! is_root_device "$partition" && ! is_mounted "$partition"; then
+                                    log "Found unmounted non-root partition: $partition"
+                                    if format_and_mount "$partition"; then
+                                        mounted_count=$((mounted_count + 1))
+                                        break  # Only mount one device/partition
+                                    fi
+                                fi
+                            done <<< "$partitions"
+                        else
+                            # No partitions, format the whole device
+                            log "Found unmounted non-root device: $device"
+                            if format_and_mount "$device"; then
+                                mounted_count=$((mounted_count + 1))
+                            fi
+                        fi
+
+                        # Break after successfully mounting one device
+                        if [[ $mounted_count -gt 0 ]]; then
+                            break
+                        fi
+
+                    done <<< "$devices"
+
+                    if [[ $mounted_count -eq 0 ]]; then
+                        log "No additional devices found to mount"
+                    else
+                        log "Successfully processed $mounted_count device(s)"
+                    fi
+
+                    log "Auto-mount script completed"
+                }
+
+                mount_data
+
+                cat > /opt/monitoring/buckets.yaml <<END
+                mimir_bucket: ${!If [CreateMimirBucket, !Ref MimirBucket, '']}
+                loki_bucket: ${!If [CreateLokiBucket, !Ref LokiBucket, '']}
+                tempo_bucket: ${!If [CreateTempoBucket, !Ref TempoBucket, '']}
+                backup_bucket: ${!If [CreateBackupBucket, !Ref BackupBucket, '']}
+                END
+
+                groupadd ansible
+                useradd -m -s /bin/bash -g ansible ansible
+                usermod -aG sudo ansible
+                echo 'ansible ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ansible
+
+                mkdir -p /home/ansible/.ssh
+                chmod 700 /home/ansible/.ssh
+                chown ansible:ansible /home/ansible/.ssh
+
+                cat > /home/ansible/.ssh/ansible <<END
+                ${SSHKeyResource.PrivateKey}
+                END
+                cat > /home/ansible/.ssh/ansible.pub <<END
+                ${SSHKeyResource.PublicKey}
+                END
+                cp /home/ansible/.ssh/ansible.pub /home/ansible/.ssh/authorized_keys
+
+                cat > /home/ansible/.ssh/config <<END
+                Host *
+                  StrictHostKeyChecking no
+                  ForwardAgent yes
+                  ControlPath ~/.ssh/%C
+                  ControlMaster auto
+                  ControlPersist 600
+                  ServerAliveInterval 60
+                  ServerAliveCountMax 2
+                END
+                chown -R ansible:ansible /home/ansible/.ssh/ansible /home/ansible/.ssh/ansible.pub /home/ansible/.ssh/config /home/ansible/.ssh/authorized_keys
+                chmod 600 /home/ansible/.ssh/ansible /home/ansible/.ssh/ansible.pub /home/ansible/.ssh/config /home/ansible/.ssh/authorized_keys
+
+                mkdir -p /root/.ssh
+                cp /home/ansible/.ssh/ansible* /home/ansible/.ssh/authorized_keys /root/.ssh/
+                cp /home/ansible/.ssh/config /root/.ssh/
+                chmod 600 /root/.ssh/ansible /root/.ssh/ansible.pub /root/.ssh/config /home/ansible/.ssh/authorized_keys
+
+                cat > /etc/profile.d/ansible.sh <<END
+                export CLOUD_ENVIRONMENT=aws
+                export ANSIBLE_ROLE=tag_Role_${Role}
+                export ANSIBLE_USER=ansible
+                export ANSIBLE_INVENTORY="/opt/ansible-monitoring/inventory/aws_ec2.yaml"
+                export LOAD_BALANCER=${!If [CreateLoadBalancer, !GetAtt LoadBalancer.DNSName, '']}
+                END
+
+                cat > /etc/default/wizard <<END
+                CLOUD_ENVIRONMENT=aws
+                ANSIBLE_ROLE=tag_Role_${Role}
+                ANSIBLE_USER=ansible
+                ANSIBLE_INVENTORY="/opt/ansible-monitoring/inventory/aws_ec2.yaml"
+                LOAD_BALANCER=${!If [CreateLoadBalancer, !GetAtt LoadBalancer.DNSName, '']}
+                END
+
+                systemctl daemon-reload
+                systemctl restart wizard
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-monitoring'
+        - Key: Role
+          Value: !Ref Role
+        - Key: mimir_bucket
+          Value: !If [CreateMimirBucket, !Ref MimirBucket, '']
+        - Key: loki_bucket
+          Value: !If [CreateLokiBucket, !Ref LokiBucket, '']
+        - Key: tempo_bucket
+          Value: !If [CreateTempoBucket, !Ref TempoBucket, '']
+        - Key: backup_bucket
+          Value: !If [CreateBackupBucket, !Ref BackupBucket, '']
+        - Key: load_balancer
+          Value: !If [CreateLoadBalancer, !GetAtt LoadBalancer.DNSName, '']
+
+  # Elastic IPs
+  MonitoringEIP:
+    Type: AWS::EC2::EIP
+    Condition: CreateEIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref MonitoringInstance
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-eip'
+
+  # Auto Scaling Resources
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Condition: CreateAutoScaling
+    Properties:
+      LaunchTemplateName: !Sub '${ProjectName}-${Environment}-monitoring'
+      LaunchTemplateData:
+        ImageId: !If [UseLatestAmi, !Ref LatestUbuntuAmi, !Ref AmiId]
+        InstanceType: !Ref InstanceType
+        KeyName: !If [UseKeyPair, !Ref KeyPairName, !Ref 'AWS::NoValue']
+        SecurityGroupIds:
+          - !Ref MonitoringSecurityGroup
+        IamInstanceProfile:
+          Name: !If [CreateIamRole, !Ref MonitoringInstanceProfile, !Ref IamInstanceProfile]
+        Monitoring:
+          Enabled: !Ref EnableMonitoring
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs:
+              VolumeType: gp3
+              VolumeSize: !Ref RootVolumeSize
+              Encrypted: true
+              DeleteOnTermination: true
+          - DeviceName: /dev/sdf
+            Ebs:
+              VolumeType: gp3
+              VolumeSize: !Ref DataVolumeSize
+              Encrypted: true
+              DeleteOnTermination: true
+        UserData:
+          Fn::If:
+            - UseCustomUserData
+            - !Ref UserDataScript
+            - !Base64
+                Fn::Sub: |
+                  #!/bin/bash
+                  set -e
+
+                  # Mount data volume
+                  if [ -f /dev/nvme1n1 ]; then
+                    mkfs -t ext4 /dev/nvme1n1 || true
+                    mkdir -p /data
+                    mount /dev/nvme1n1 /data
+                    echo "/dev/nvme1n1 /data ext4 defaults,nofail 0 2" >> /etc/fstab
+                  fi
+
+                  cat > /opt/monitoring/buckets.yaml <<END
+                  mimir_bucket: ${!If [CreateMimirBucket, !Ref MimirBucket, '']}
+                  loki_bucket: ${!If [CreateLokiBucket, !Ref LokiBucket, '']}
+                  tempo_bucket: ${!If [CreateTempoBucket, !Ref TempoBucket, '']}
+                  backup_bucket: ${!If [CreateBackupBucket, !Ref BackupBucket, '']}
+                  END
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub '${ProjectName}-${Environment}-asg-instance'
+          - ResourceType: volume
+            Tags:
+              - Key: Name
+                Value: !Sub '${ProjectName}-${Environment}-asg-volume'
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Condition: CreateAutoScaling
+    Properties:
+      AutoScalingGroupName: !Sub '${ProjectName}-${Environment}-monitoring'
+      VPCZoneIdentifier: !Ref SubnetIds
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      DesiredCapacity: !Ref DesiredCapacity
+      HealthCheckType: !If [CreateLoadBalancer, ELB, EC2]
+      HealthCheckGracePeriod: !Ref HealthCheckGracePeriod
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      TargetGroupARNs: !If [CreateLoadBalancer, [!Ref GrafanaTargetGroup, !Ref LokiTargetGroup, !Ref OtelGrpcTargetGroup, !Ref OtelHttpTargetGroup, !Ref TempoHttpTargetGroup, !Ref TempoGrpcTargetGroup, !Ref MimirTargetGroup], !Ref 'AWS::NoValue']
+      MetricsCollection: !If [EnableDetailedMonitoring, [{Granularity: 1Minute, Metrics: [GroupMinSize, GroupMaxSize, GroupDesiredCapacity, GroupInServiceInstances, GroupTotalInstances]}], !Ref 'AWS::NoValue']
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-asg'
+          PropagateAtLaunch: false
+
+  # Load Balancer Resources
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Condition: CreateLoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-nlb'
+      Type: network
+      Scheme: !If [CreateInternalLB, internal, internet-facing]
+      Subnets: !If [UseLbSubnets, !Ref LbSubnetIds, !Ref SubnetIds]
+      LoadBalancerAttributes:
+        - Key: deletion_protection.enabled
+          Value: !Ref EnableTerminationProtection
+        - Key: load_balancing.cross_zone.enabled
+          Value: 'true'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-nlb'
+
+  # Target Groups and Listeners
+  GrafanaTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: CreateLoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-gr'
+      Port: !FindInMap [ServicePorts, Ports, Grafana]
+      Protocol: TCP
+      VpcId: !Ref VpcId
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: TCP
+      HealthCheckPort: !FindInMap [ServicePorts, Ports, Grafana]
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-tg-grafana'
+
+  GrafanaListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: CreateLoadBalancer
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: !FindInMap [ServicePorts, Ports, Grafana]
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref GrafanaTargetGroup
+
+  LokiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: CreateLoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-lo'
+      Port: !FindInMap [ServicePorts, Ports, Loki]
+      Protocol: TCP
+      VpcId: !Ref VpcId
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: TCP
+      HealthCheckPort: !FindInMap [ServicePorts, Ports, Loki]
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-tg-loki'
+
+  LokiListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: CreateLoadBalancer
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: !FindInMap [ServicePorts, Ports, Loki]
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref LokiTargetGroup
+
+  OtelGrpcTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: CreateLoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-og'
+      Port: !FindInMap [ServicePorts, Ports, OtelGrpc]
+      Protocol: TCP
+      VpcId: !Ref VpcId
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: TCP
+      HealthCheckPort: !FindInMap [ServicePorts, Ports, OtelGrpc]
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-tg-otel-grpc'
+
+  OtelGrpcListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: CreateLoadBalancer
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: !FindInMap [ServicePorts, Ports, OtelGrpc]
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref OtelGrpcTargetGroup
+
+  OtelHttpTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: CreateLoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-oh'
+      Port: !FindInMap [ServicePorts, Ports, OtelHttp]
+      Protocol: TCP
+      VpcId: !Ref VpcId
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: TCP
+      HealthCheckPort: !FindInMap [ServicePorts, Ports, OtelHttp]
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-tg-otel-http'
+
+  OtelHttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: CreateLoadBalancer
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: !FindInMap [ServicePorts, Ports, OtelHttp]
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref OtelHttpTargetGroup
+
+  TempoHttpTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: CreateLoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-th'
+      Port: !FindInMap [ServicePorts, Ports, TempoHttp]
+      Protocol: TCP
+      VpcId: !Ref VpcId
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: TCP
+      HealthCheckPort: !FindInMap [ServicePorts, Ports, TempoHttp]
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-tg-tempo-http'
+
+  TempoHttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: CreateLoadBalancer
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: !FindInMap [ServicePorts, Ports, TempoHttp]
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TempoHttpTargetGroup
+
+  TempoGrpcTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: CreateLoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-tg'
+      Port: !FindInMap [ServicePorts, Ports, TempoGrpc]
+      Protocol: TCP
+      VpcId: !Ref VpcId
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: TCP
+      HealthCheckPort: !FindInMap [ServicePorts, Ports, TempoGrpc]
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-tg-tempo-grpc'
+
+  TempoGrpcListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: CreateLoadBalancer
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: !FindInMap [ServicePorts, Ports, TempoGrpc]
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TempoGrpcTargetGroup
+
+  MimirTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: CreateLoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-mi'
+      Port: !FindInMap [ServicePorts, Ports, Mimir]
+      Protocol: TCP
+      VpcId: !Ref VpcId
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: TCP
+      HealthCheckPort: !FindInMap [ServicePorts, Ports, Mimir]
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-tg-mimir'
+
+  MimirListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: CreateLoadBalancer
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: !FindInMap [ServicePorts, Ports, Mimir]
+      Protocol: TCP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref MimirTargetGroup
+
+  # Target Group Attachments for non-autoscaling instances
+  GrafanaTargetGroupAttachment:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroupAttachment
+    Condition: CreateLoadBalancerAndInstances
+    Properties:
+      TargetGroupArn: !Ref GrafanaTargetGroup
+      TargetId: !Ref MonitoringInstance
+      Port: !FindInMap [ServicePorts, Ports, Grafana]
+
+  LokiTargetGroupAttachment:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroupAttachment
+    Condition: CreateLoadBalancerAndInstances
+    Properties:
+      TargetGroupArn: !Ref LokiTargetGroup
+      TargetId: !Ref MonitoringInstance
+      Port: !FindInMap [ServicePorts, Ports, Loki]
+
+  OtelGrpcTargetGroupAttachment:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroupAttachment
+    Condition: CreateLoadBalancerAndInstances
+    Properties:
+      TargetGroupArn: !Ref OtelGrpcTargetGroup
+      TargetId: !Ref MonitoringInstance
+      Port: !FindInMap [ServicePorts, Ports, OtelGrpc]
+
+  OtelHttpTargetGroupAttachment:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroupAttachment
+    Condition: CreateLoadBalancerAndInstances
+    Properties:
+      TargetGroupArn: !Ref OtelHttpTargetGroup
+      TargetId: !Ref MonitoringInstance
+      Port: !FindInMap [ServicePorts, Ports, OtelHttp]
+
+  TempoHttpTargetGroupAttachment:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroupAttachment
+    Condition: CreateLoadBalancerAndInstances
+    Properties:
+      TargetGroupArn: !Ref TempoHttpTargetGroup
+      TargetId: !Ref MonitoringInstance
+      Port: !FindInMap [ServicePorts, Ports, TempoHttp]
+
+  TempoGrpcTargetGroupAttachment:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroupAttachment
+    Condition: CreateLoadBalancerAndInstances
+    Properties:
+      TargetGroupArn: !Ref TempoGrpcTargetGroup
+      TargetId: !Ref MonitoringInstance
+      Port: !FindInMap [ServicePorts, Ports, TempoGrpc]
+
+  MimirTargetGroupAttachment:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroupAttachment
+    Condition: CreateLoadBalancerAndInstances
+    Properties:
+      TargetGroupArn: !Ref MimirTargetGroup
+      TargetId: !Ref MonitoringInstance
+      Port: !FindInMap [ServicePorts, Ports, Mimir]
+
+Outputs:
+  InstanceIds:
+    Description: IDs of monitoring instances
+    Value: !If [CreateInstances, !Ref MonitoringInstance, '']
+
+  InstancePrivateIps:
+    Description: Private IP addresses of monitoring instances
+    Value: !If [CreateInstances, !GetAtt MonitoringInstance.PrivateIp, '']
+
+  InstancePublicIps:
+    Description: Public IP addresses of monitoring instances
+    Value: !If [CreateInstances, !GetAtt MonitoringInstance.PublicIp, '']
+
+  ElasticIps:
+    Description: Elastic IP addresses
+    Value: !If [CreateEIP, !Ref MonitoringEIP, '']
+
+  SecurityGroupId:
+    Description: ID of the monitoring security group
+    Value: !Ref MonitoringSecurityGroup
+
+  IamRoleArn:
+    Description: ARN of the IAM role
+    Value: !If [CreateIamRole, !GetAtt MonitoringRole.Arn, '']
+
+  IamInstanceProfileName:
+    Description: Name of the IAM instance profile
+    Value: !If [CreateIamRole, !Ref MonitoringInstanceProfile, !Ref IamInstanceProfile]
+
+  MimirBucketName:
+    Description: Name of the Mimir S3 bucket
+    Value: !If [CreateMimirBucket, !Ref MimirBucket, '']
+
+  MimirBucketArn:
+    Description: ARN of the Mimir S3 bucket
+    Value: !If [CreateMimirBucket, !GetAtt MimirBucket.Arn, '']
+
+  LokiBucketName:
+    Description: Name of the Loki S3 bucket
+    Value: !If [CreateLokiBucket, !Ref LokiBucket, '']
+
+  LokiBucketArn:
+    Description: ARN of the Loki S3 bucket
+    Value: !If [CreateLokiBucket, !GetAtt LokiBucket.Arn, '']
+
+  TempoBucketName:
+    Description: Name of the Tempo S3 bucket
+    Value: !If [CreateTempoBucket, !Ref TempoBucket, '']
+
+  TempoBucketArn:
+    Description: ARN of the Tempo S3 bucket
+    Value: !If [CreateTempoBucket, !GetAtt TempoBucket.Arn, '']
+
+  BackupBucketName:
+    Description: Name of the backup S3 bucket
+    Value: !If [CreateBackupBucket, !Ref BackupBucket, '']
+
+  BackupBucketArn:
+    Description: ARN of the backup S3 bucket
+    Value: !If [CreateBackupBucket, !GetAtt BackupBucket.Arn, '']
+
+  LoadBalancerDns:
+    Description: DNS name of the load balancer
+    Value: !If [CreateLoadBalancer, !GetAtt LoadBalancer.DNSName, '']
+
+  LoadBalancerArn:
+    Description: ARN of the load balancer
+    Value: !If [CreateLoadBalancer, !Ref LoadBalancer, '']
+
+  LoadBalancerZoneId:
+    Description: Zone ID of the load balancer
+    Value: !If [CreateLoadBalancer, !GetAtt LoadBalancer.CanonicalHostedZoneID, '']
+
+  AutoScalingGroupName:
+    Description: Name of the auto-scaling group
+    Value: !If [CreateAutoScaling, !Ref AutoScalingGroup, '']
+
+  AutoScalingGroupArn:
+    Description: ARN of the auto-scaling group
+    Value: !If [CreateAutoScaling, !Sub 'arn:aws:autoscaling:${AWS::Region}:${AWS::AccountId}:autoScalingGroup:*:autoScalingGroupName/${AutoScalingGroup}', '']
+
+  LaunchTemplateId:
+    Description: ID of the launch template
+    Value: !If [CreateAutoScaling, !Ref LaunchTemplate, '']
+
+  LaunchTemplateLatestVersion:
+    Description: Latest version of the launch template
+    Value: !If [CreateAutoScaling, !GetAtt LaunchTemplate.LatestVersionNumber, '']
+
+  CloudWatchLogGroupName:
+    Description: Name of the CloudWatch log group
+    Value: !If [CreateCloudWatchLogs, !Ref MonitoringLogGroup, '']
+
+  CloudWatchLogGroupArn:
+    Description: ARN of the CloudWatch log group
+    Value: !If [CreateCloudWatchLogs, !GetAtt MonitoringLogGroup.Arn, '']
+
+  MonitoringEndpoints:
+    Description: Endpoints for monitoring services
+    Value: !If
+      - CreateLoadBalancer
+      - !Sub |
+          grafana: https://${LoadBalancer.DNSName}:443
+          loki: http://${LoadBalancer.DNSName}:3100
+          otel_grpc: ${LoadBalancer.DNSName}:4317
+          otel_http: http://${LoadBalancer.DNSName}:4318
+          tempo_http: http://${LoadBalancer.DNSName}:3200
+          tempo_grpc: ${LoadBalancer.DNSName}:9095
+          mimir: http://${LoadBalancer.DNSName}:9009
+      - ''
+
+  MonitoringPorts:
+    Description: Fixed ports used by monitoring services
+    Value: |
+      grafana: 443
+      loki: 3100
+      otel_grpc: 4317
+      otel_http: 4318
+      tempo_http: 3200
+      tempo_grpc: 9095
+      mimir: 9009
+      prometheus: 9090
+      alertmanager: 9093

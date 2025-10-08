@@ -78,8 +78,8 @@ Parameters:
 
   AmiId:
     Type: String
-    Default: ''
-    Description: 'Custom AMI ID to use instead of the latest Ubuntu 22.04. Leave empty to automatically use the latest Ubuntu 22.04 LTS AMI from AWS Systems Manager. Only specify if you have a custom image. Example: ami-0123456789abcdef0'
+    Default: 'ami-0e5073b5be3a45867'
+    Description: 'AMI ID of the monitoring platform'
 
   # Load Balancer Configuration
   EnableLoadBalancer:

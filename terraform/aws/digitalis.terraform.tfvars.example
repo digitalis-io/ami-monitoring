@@ -17,7 +17,7 @@ key_pair_name    = "serg"
 root_volume_size = 50
 data_volume_size = 10
 
-ami_id = "ami-0def77c2ec2c9020f"
+# ami_id = "ami-0def77c2ec2c9020f"
 
 # S3 Buckets for Storage
 enable_mimir_bucket  = true

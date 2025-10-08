@@ -69,9 +69,9 @@ variable "key_pair_name" {
 }
 
 variable "ami_id" {
-  description = "AMI ID for EC2 instances (if empty, will use latest Ubuntu 22.04)"
+  description = "AMI ID for the EC2 Monitoring Stack"
   type        = string
-  default     = ""
+  default     = "ami-0e5073b5be3a45867"
 }
 
 variable "enable_load_balancer" {

@@ -152,7 +152,7 @@ Parameters:
 
   AmiId:
     Type: String
-    Default: 'ami-0e5073b5be3a45867'
+    Default: 'ami-0254606f94f524f72'
     Description: 'AmiID to use'
 
 Conditions:

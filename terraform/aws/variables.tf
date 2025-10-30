@@ -71,7 +71,7 @@ variable "key_pair_name" {
 variable "ami_id" {
   description = "AMI ID for the EC2 Monitoring Stack"
   type        = string
-  default     = "ami-0254606f94f524f72"
+  default     = ""
 }
 
 variable "enable_load_balancer" {

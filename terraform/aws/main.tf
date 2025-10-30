@@ -541,10 +541,21 @@ resource "tls_private_key" "ssh" {
   ecdsa_curve = "P384"
 }
 
+data "aws_ami" "marketplace_ami" {
+  most_recent = true
+
+  filter {
+    name   = "name"
+    values = ["digitalis-monitoring*"]
+  }
+
+  owners = ["679593333241"]
+}
+
 resource "aws_instance" "monitoring" {
   count = var.enable_auto_scaling ? 0 : var.instance_count
 
-  ami                    = var.ami_id
+  ami                    = var.ami_id == "" ? data.aws_ami.marketplace_ami.id : var.ami_id
   instance_type          = var.instance_type
   subnet_id              = var.subnet_ids[count.index % length(var.subnet_ids)]
   vpc_security_group_ids = [aws_security_group.monitoring.id]

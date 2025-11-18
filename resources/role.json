@@ -1,0 +1,80 @@
+{
+    "Statement": [
+        {
+            "Action": [
+                "ec2:DescribeTags",
+                "ec2:DescribeInstances",
+                "ec2:DescribeRegions"
+            ],
+            "Effect": "Allow",
+            "Resource": "*",
+            "Sid": "AllowReadingTagsInstancesRegionsFromEC2"
+        },
+        {
+            "Action": [
+                "cloudwatch:DescribeAlarmsForMetric",
+                "cloudwatch:DescribeAlarmHistory",
+                "cloudwatch:DescribeAlarms",
+                "cloudwatch:ListMetrics",
+                "cloudwatch:GetMetricData",
+                "cloudwatch:GetMetricStatistics",
+                "cloudwatch:GetMetricWidgetImage",
+                "cloudwatch:ListDashboards"
+            ],
+            "Effect": "Allow",
+            "Resource": "*",
+            "Sid": "AllowReadingMetricsFromCloudWatch"
+        },
+        {
+            "Action": [
+                "logs:DescribeLogGroups",
+                "logs:GetLogGroupFields",
+                "logs:StartQuery",
+                "logs:StopQuery",
+                "logs:GetQueryResults",
+                "logs:GetLogEvents"
+            ],
+            "Effect": "Allow",
+            "Resource": "*",
+            "Sid": "AllowReadingLogsFromCloudWatch"
+        },
+        {
+            "Action": [
+                "tag:GetResources"
+            ],
+            "Effect": "Allow",
+            "Resource": "*",
+            "Sid": "AllowReadingResourcesForTags"
+        },
+        {
+            "Action": [
+                "s3:ListBucket",
+                "s3:GetBucketLocation"
+            ],
+            "Effect": "Allow",
+            "Resource": [
+                "arn:aws:s3:::EXAMPLE-mimir-bucket",
+                "arn:aws:s3:::EXAMPLE-loki-bucket",
+                "arn:aws:s3:::EXAMPLE-tempo-bucket",
+                "arn:aws:s3:::EXAMPLE-backups-bucket"
+            ]
+        },
+        {
+            "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:DeleteObject",
+                "s3:GetObjectVersion",
+                "s3:DeleteObjectVersion"
+            ],
+            "Effect": "Allow",
+            "Resource": [
+                "arn:aws:s3:::EXAMPLE-mimir-bucket/*",
+                "arn:aws:s3:::EXAMPLE-loki-bucket/*",
+                "arn:aws:s3:::EXAMPLE-tempo-bucket",
+                "arn:aws:s3:::EXAMPLE-backups-bucket"
+            ]
+        }
+    ],
+    "Version": "2012-10-17"
+}

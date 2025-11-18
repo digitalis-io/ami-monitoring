@@ -549,7 +549,7 @@ data "aws_ami" "marketplace_ami" {
     values = ["digitalis-monitoring*"]
   }
 
-  owners = ["679593333241"]
+  owners = ["aws-marketplace", "679593333241"]
 }
 
 resource "aws_instance" "monitoring" {

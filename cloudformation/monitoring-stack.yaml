@@ -78,8 +78,8 @@ Parameters:
 
   AmiId:
     Type: String
-    Default: 'ami-0254606f94f524f72'
-    Description: 'AMI ID of the monitoring platform'
+    Default: ''
+    Description: 'Optional AMI ID to use. Leave empty to automatically discover the latest digitalis-monitoring AMI from AWS Marketplace. Example: ami-0123456789abcdef0'
 
   # Load Balancer Configuration
   EnableLoadBalancer:
@@ -649,6 +649,92 @@ Resources:
                   - ec2:DescribeVpcs
                 Resource: '*'
 
+  # AMI Discovery
+  AmiDiscoveryCustomResource:
+    Type: AWS::CloudFormation::CustomResource
+    Condition: UseLatestAmi
+    Properties:
+      ServiceToken: !GetAtt AmiDiscoveryFunction.Arn
+
+  AmiDiscoveryFunction:
+    Type: AWS::Lambda::Function
+    Condition: UseLatestAmi
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-AmiDiscovery'
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt AmiDiscoveryFunctionRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+
+                  ec2 = boto3.client('ec2')
+
+                  # Query for the most recent AMI matching the filter
+                  response = ec2.describe_images(
+                      Filters=[
+                          {
+                              'Name': 'name',
+                              'Values': ['digitalis-monitoring*']
+                          }
+                      ],
+                      Owners=['aws-marketplace', '679593333241']
+                  )
+
+                  if not response['Images']:
+                      raise Exception('No digitalis-monitoring AMI found')
+
+                  # Sort by creation date to get the most recent
+                  images = sorted(response['Images'],
+                                 key=lambda x: x['CreationDate'],
+                                 reverse=True)
+
+                  ami_id = images[0]['ImageId']
+                  ami_name = images[0]['Name']
+
+                  print(f"Found AMI: {ami_id} ({ami_name})")
+
+                  response_data = {
+                      'AmiId': ami_id,
+                      'AmiName': ami_name
+                  }
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {}, str(e))
+
+  AmiDiscoveryFunctionRole:
+    Type: AWS::IAM::Role
+    Condition: UseLatestAmi
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DescribeImages
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeImages
+                Resource: '*'
+
   # IAM Role and Instance Profile
   MonitoringRole:
     Type: AWS::IAM::Role
@@ -944,7 +1030,10 @@ Resources:
     Type: AWS::EC2::Instance
     Condition: CreateInstances
     Properties:
-      ImageId: !If [UseLatestAmi, !Ref LatestUbuntuAmi, !Ref AmiId]
+      ImageId: !If
+        - UseLatestAmi
+        - !GetAtt AmiDiscoveryCustomResource.AmiId
+        - !Ref AmiId
       InstanceType: !Ref InstanceType
       SubnetId: !Select [0, !Ref SubnetIds]
       SecurityGroupIds:
@@ -1226,7 +1315,10 @@ Resources:
     Properties:
       LaunchTemplateName: !Sub '${ProjectName}-${Environment}-monitoring'
       LaunchTemplateData:
-        ImageId: !If [UseLatestAmi, !Ref LatestUbuntuAmi, !Ref AmiId]
+        ImageId: !If
+          - UseLatestAmi
+          - !GetAtt AmiDiscoveryCustomResource.AmiId
+          - !Ref AmiId
         InstanceType: !Ref InstanceType
         KeyName: !If [UseKeyPair, !Ref KeyPairName, !Ref 'AWS::NoValue']
         SecurityGroupIds:
@@ -1589,6 +1681,20 @@ Resources:
       Port: !FindInMap [ServicePorts, Ports, Mimir]
 
 Outputs:
+  AmiId:
+    Description: AMI ID used for the monitoring instances
+    Value: !If
+      - UseLatestAmi
+      - !GetAtt AmiDiscoveryCustomResource.AmiId
+      - !Ref AmiId
+
+  AmiName:
+    Description: AMI Name (only available when auto-discovered)
+    Value: !If
+      - UseLatestAmi
+      - !GetAtt AmiDiscoveryCustomResource.AmiName
+      - 'N/A - Manual AMI ID provided'
+
   InstanceIds:
     Description: IDs of monitoring instances
     Value: !If [CreateInstances, !Ref MonitoringInstance, '']
